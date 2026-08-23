@@ -9,7 +9,7 @@ export type Route =
   | { name: 'join'; sessionId: string }
   | { name: 'chat'; sessionId: string; role: Role; packedKey: string }
 
-function parseHash(hash: string): Route {
+export function parseHash(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean)
 
   if (parts[0] === 'join' && parts[1]) {
@@ -20,6 +20,19 @@ function parseHash(hash: string): Route {
     return { name: 'chat', sessionId: parts[1], role, packedKey: parts[3] }
   }
   return { name: 'home' }
+}
+
+/**
+ * Pulls just the `#/chat/...` or `#/join/...` fragment out of whatever was
+ * pasted — a full link (any origin, e.g. a different Netlify preview), a
+ * bare fragment, or a fragment missing its leading `#`. All deploys share
+ * the same Supabase backend, so only the fragment matters.
+ */
+export function extractHash(pasted: string): string {
+  const trimmed = pasted.trim()
+  const hashIndex = trimmed.indexOf('#')
+  if (hashIndex !== -1) return trimmed.slice(hashIndex)
+  return trimmed.startsWith('/') ? `#${trimmed}` : `#/${trimmed}`
 }
 
 export const route = ref<Route>(parseHash(window.location.hash))

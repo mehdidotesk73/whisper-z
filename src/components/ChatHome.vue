@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { generateKeyPair, exportPublicKey, exportPrivateKey, jwkToUrlSafe } from '../lib/crypto'
 import { createSession } from '../api/session'
-import { chatHash, inviteHash, navigate } from '../lib/route'
+import { chatHash, inviteHash, navigate, parseHash, extractHash } from '../lib/route'
 import { copyToClipboard } from '../lib/clipboard'
 import { logDebug } from '../debug'
 
@@ -13,6 +13,21 @@ const inviteLink = ref('')
 const chatDestination = ref('')
 const copiedPersonal = ref(false)
 const copiedInvite = ref(false)
+
+const pastedLink = ref('')
+const pasteError = ref('')
+
+function goToPastedLink() {
+  pasteError.value = ''
+  if (!pastedLink.value.trim()) return
+
+  const hash = extractHash(pastedLink.value)
+  if (parseHash(hash).name === 'home') {
+    pasteError.value = "That doesn't look like a chat link — check you copied the whole thing."
+    return
+  }
+  navigate(hash)
+}
 
 async function startChat() {
   starting.value = true
@@ -75,6 +90,22 @@ function goToChat() {
       <p v-if="failed" class="error">
         Couldn't start a chat — check your connection and try again.
       </p>
+
+      <div class="divider"><span>or</span></div>
+
+      <div class="link-block">
+        <label>Go to a chat</label>
+        <p class="hint">Paste a personal or invite link you saved, and it'll take you there.</p>
+        <div class="link-row">
+          <input
+            v-model="pastedLink"
+            placeholder="Paste link here"
+            @keydown.enter="goToPastedLink"
+          />
+          <button @click="goToPastedLink">Go</button>
+        </div>
+        <p v-if="pasteError" class="error">{{ pasteError }}</p>
+      </div>
     </template>
 
     <template v-else>
@@ -134,6 +165,22 @@ function goToChat() {
 .error {
   color: var(--danger);
   margin: 0;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }
 
 .link-block {

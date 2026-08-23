@@ -42,9 +42,29 @@ Emitting declarations for an *app* makes `vue-tsc` demand exported names for eve
 
 `__BUILD_ID__` and `__BUILD_TIME__` are injected by Vite's `define`, and `virtual:pwa-register` only exists at build time. TypeScript knows about none of them without an `src/env.d.ts` declaring the constants and referencing `vite/client` and `vite-plugin-pwa/client`. Without it the build fails with `TS2304: Cannot find name '__BUILD_ID__'`.
 
+### Importing a Markdown Doc as Text Needs Its Own Ambient Type
+
+`vite/client`'s ambient types cover common asset extensions (`.svg`, `.png`, …) but not `.md`, and
+not the `?raw` suffix generically. `import overviewDoc from '../../docs/concepts/overview.md?raw'`
+works fine at runtime (Vite inlines the file as a string) but fails `vue-tsc` with "Cannot find
+module" until `src/env.d.ts` declares `declare module '*.md?raw' { const content: string; export
+default content }`. Same shape as the `__BUILD_ID__` entry above: Vite's runtime behavior and
+TypeScript's view of the world are two separate things, and a working build doesn't mean a passing
+type-check until both agree.
+
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)
+
+### v0.2.0 — 2026-08-23
+- **Added:** The core encrypted chat flow — Start a chat / Join a chat / Chat view, wired to a
+  hash-based router (no `vue-router` needed for three screens)
+- **Crypto:** ECDH (P-256) key agreement + AES-GCM message encryption in `src/lib/crypto.ts`;
+  private keys never leave the browser, carried only in each participant's personal link
+- **Infrastructure:** Supabase (`sessions`, `messages` tables, link-only RLS, realtime) as the
+  shared backend so two browsers can sync a conversation
+- **Docs:** Help modal now renders the real `docs/concepts/overview.md` instead of a placeholder
+  string; `docs/system-design.md` documents the data/trust model (§3a)
 
 ### v0.1.0 — [Date]
 - **Added:** Initial scaffold, header/footer wrapper, Help modal

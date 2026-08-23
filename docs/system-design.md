@@ -9,9 +9,14 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 - **Header/footer shell** — app title, Help modal, build/version info, reload affordance, debug panel
 - **Service-worker caching** — offline capability, smart update detection
 - **Mobile-first UX** — responsive, touch-optimized, no hover-only interactions
-- **Pure computation layer** (`src/lib/`) — reusable logic separated from UI
+- **Three screens** (`src/components/ChatHome.vue`, `JoinChat.vue`, `ChatView.vue`), switched by a
+  hash-based router (`src/lib/route.ts`) — no `vue-router`, just enough parsing for three states
+- **Pure computation layer** (`src/lib/`) — key agreement, encrypt/decrypt, routing, clipboard
+- **Data layer** (`src/api/`) — the Supabase client and session/message reads, writes, and realtime
+  subscriptions
 - **Hot reload in dev** — instant feedback on code changes
 - **Netlify** — production site and a live preview on every branch/PR, one host
+- **Supabase** — shared Postgres database so two browsers can sync a conversation; see §3a
 
 ### Architecture Diagram
 
@@ -26,17 +31,27 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 │  │  ├─ HelpModal                     │  │
 │  │  ├─ DebugPanel                    │  │
 │  │  ├─ UpdateAvailablePrompt         │  │
-│  │  └─ <your content here>           │  │
+│  │  └─ route.ts picks one of:        │  │
+│  │      ChatHome │ JoinChat │ ChatView│ │
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
 │  │  lib/ (pure functions)            │  │
-│  │  ├─ Data fetch & cache            │  │
-│  │  ├─ Computation logic             │  │
-│  │  └─ Utilities                     │  │
+│  │  ├─ crypto.ts (ECDH + AES-GCM)    │  │
+│  │  ├─ route.ts (hash router)        │  │
+│  │  └─ clipboard.ts                  │  │
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
-│  │  External APIs (if needed)        │  │
+│  │  api/ (Supabase data access)      │  │
+│  │  ├─ supabase.ts (client)          │  │
+│  │  └─ session.ts (reads/writes/     │  │
+│  │      realtime subscriptions)      │  │
 │  └───────────────────────────────────┘  │
+└──────────────────┬──────────────────────┘
+                    │ ciphertext + public keys only
+                    ▼
+┌─────────────────────────────────────────┐
+│   Supabase (Postgres + Realtime)        │
+│   sessions, messages — see §3a          │
 └─────────────────────────────────────────┘
 ```
 
@@ -74,6 +89,45 @@ src/api/
 
 Keep fetches synchronous from the component's perspective using a composable (below) that caches results.
 
+## §3a — Chat Data Model & Trust Model
+
+Two tables in Supabase, link-only sharing (a session's `id` is its own access key — see the
+honest-version-of-"anyone with the link" caveat in `docs/experience.md`):
+
+```sql
+sessions (id uuid pk, starter_public_key text, joiner_public_key text nullable, created_at)
+messages (id uuid pk, session_id fk → sessions, sender 'starter'|'joiner', ciphertext text, iv text, created_at)
+```
+
+**Key agreement:** each side generates an ECDH (P-256) keypair locally (`src/lib/crypto.ts`,
+`generateKeyPair`). Only the public half is ever written to `sessions`. Starting a chat writes
+`starter_public_key`; joining writes `joiner_public_key` (guarded by
+`.is('joiner_public_key', null)` so a second visitor to the same invite link can't overwrite the
+real joiner). Once both public keys exist, each side derives the identical AES-GCM key from *their
+own private key + the other side's public key* (`deriveSharedKey`) — the shared secret itself is
+never transmitted or stored.
+
+**Where the private key lives:** nowhere but the URL. `ChatHome`/`JoinChat` export the freshly
+generated private key as a JWK, pack it into a URL-safe string (`jwkToUrlSafe`), and put it in the
+fragment of that participant's **personal link** (`#/chat/<sessionId>/<role>/<packedKey>`). A
+fragment never leaves the browser (not sent to any server, including Netlify), so the only way to
+recover a chat is to still have that link. Losing it is unrecoverable by design — see
+`docs/concepts/overview.md`.
+
+**Message flow:** `ChatView` fetches existing `messages` rows and decrypts each with the derived
+key, then subscribes to `postgres_changes` INSERTs on `messages` (filtered to the session) for new
+ones — including its own sends, which round-trip back through the same subscription rather than
+being rendered optimistically. It also subscribes to UPDATEs on `sessions` while waiting, so the
+"waiting for the other person to join" screen resolves the moment the other side's public key
+appears, without a page reload.
+
+**What the server can and can't see:** `ciphertext`/`iv` are opaque to anyone reading the database
+directly — same protection described in "End-to-End Encryption Over a Database You Don't Trust" in
+`docs/experience.md`. Metadata (that a session exists, roughly when messages were sent, message
+count) is not hidden. There's no out-of-band key verification (no "safety numbers"), so a
+compromised or MITM'd first exchange isn't caught — acceptable for this app's scope, called out
+honestly in the Help doc rather than oversold.
+
 ## §4 — Shared Logic (lib/)
 
 Pure functions over already-fetched data. These recompute instantly, no refetch. Example:
@@ -110,9 +164,10 @@ Organized by feature. Keep them thin — mostly templating, logic lives in `lib/
 
 ```
 src/components/
-  HelpModal.vue      (provided)
-  <FeatureA>.vue
-  <FeatureB>.vue
+  HelpModal.vue      renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
+  ChatHome.vue        "Start a chat" + the created session's personal/invite links
+  JoinChat.vue        "Join chat" via an invite link + the joiner's own personal link
+  ChatView.vue        waiting state, decrypted thread, composer
 ```
 
 ## §7 — Build, Deploy & Conventions

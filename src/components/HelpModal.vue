@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
+import overviewDoc from '../../docs/concepts/overview.md?raw'
 
 interface Props {
   open: boolean
@@ -13,31 +14,13 @@ interface Emits {
 defineProps<Props>()
 defineEmits<Emits>()
 
-// Load markdown docs from docs/concepts/
-const docs = ref<Record<string, string>>({})
-const currentDoc = ref('default')
+const docs: Record<string, string> = {
+  overview: overviewDoc,
+}
+const currentDoc = ref('overview')
 
-onMounted(async () => {
-  try {
-    // Load available concept docs
-    // In a real app, you'd fetch these from docs/concepts/*.md
-    // For now, we'll provide a placeholder
-    docs.value = {
-      default: `# Welcome
-
-Check the Help modal to read documentation about your app.
-
-Each page in your app should have a corresponding markdown file in \`docs/concepts/\`. Update those files to help users understand what they're looking at.
-
-See the README for more info.`,
-    }
-  } catch (e) {
-    console.error('Failed to load help docs', e)
-  }
-})
-
-const currentDocContent = computed(() => docs.value[currentDoc.value] || docs.value['default'] || '')
-const docKeys = computed(() => Object.keys(docs.value))
+const currentDocContent = computed(() => docs[currentDoc.value] || docs['overview'] || '')
+const docKeys = computed(() => Object.keys(docs))
 </script>
 
 <template>
@@ -68,15 +51,20 @@ const docKeys = computed(() => Object.keys(docs.value))
 
 <script lang="ts">
 // Simple markdown to HTML converter
+function formatInline(text: string): string {
+  return text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+}
+
 function formatMarkdown(md: string): string {
   return md
     .split('\n')
     .map((line) => {
-      if (line.startsWith('# ')) return `<h1>${line.slice(2)}</h1>`
-      if (line.startsWith('## ')) return `<h2>${line.slice(3)}</h2>`
-      if (line.startsWith('- ')) return `<li>${line.slice(2)}</li>`
+      if (line.startsWith('# ')) return `<h1>${formatInline(line.slice(2))}</h1>`
+      if (line.startsWith('## ')) return `<h2>${formatInline(line.slice(3))}</h2>`
+      if (line.startsWith('- ')) return `<li>${formatInline(line.slice(2))}</li>`
       if (line.startsWith('`')) return `<code>${line.slice(1, -1)}</code>`
-      return line ? `<p>${line}</p>` : ''
+      if (line.startsWith('---')) return '<hr>'
+      return line ? `<p>${formatInline(line)}</p>` : ''
     })
     .join('')
 }

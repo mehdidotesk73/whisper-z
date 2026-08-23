@@ -39,3 +39,5 @@ export function chatHash(sessionId: string, role: Role, packedKey: string): stri
 export function inviteHash(sessionId: string): string {
   return `#/join/${sessionId}`
 }
+
+export const homeHash = '#/'

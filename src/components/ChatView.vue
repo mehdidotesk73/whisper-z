@@ -20,6 +20,7 @@ import {
   type Role,
 } from '../api/session'
 import { copyToClipboard } from '../lib/clipboard'
+import { navigate, homeHash } from '../lib/route'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
@@ -130,10 +131,16 @@ async function copyInvite() {
     setTimeout(() => (copiedInvite.value = false), 1500)
   }
 }
+
+function goHome() {
+  navigate(homeHash)
+}
 </script>
 
 <template>
   <div class="chat">
+    <button class="home-link" @click="goHome">← Home</button>
+
     <p v-if="status === 'loading'" class="status">Loading…</p>
 
     <p v-else-if="status === 'not-found'" class="status error">
@@ -186,6 +193,17 @@ async function copyInvite() {
 
 .status.error {
   color: var(--danger);
+}
+
+.home-link {
+  align-self: flex-start;
+  padding: 0.3rem 0.1rem;
+  min-height: 44px;
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  font-size: 0.9rem;
+  font-weight: 600;
 }
 
 .waiting {

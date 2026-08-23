@@ -9,9 +9,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
       manifest: {
-        name: 'App Name',
-        short_name: 'App',
-        description: 'A web app built with Claude Code',
+        name: 'whisper-z',
+        short_name: 'whisper-z',
+        description: 'An end-to-end encrypted two-person messaging app',
         theme_color: '#ffffff',
         background_color: '#ffffff',
         display: 'standalone',

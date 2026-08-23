@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import HelpModal from './components/HelpModal.vue'
+import ChatHome from './components/ChatHome.vue'
+import JoinChat from './components/JoinChat.vue'
+import ChatView from './components/ChatView.vue'
 import { debugState, logDebug, logAsText } from './debug'
 import { reloadLatest } from './pwa'
+import { route } from './lib/route'
 
 const buildId = __BUILD_ID__
 const buildTime = __BUILD_TIME__
@@ -93,17 +97,23 @@ onMounted(() => {
             </button>
           </div>
         </div>
-        <h1 class="app-title">App Name</h1>
+        <h1 class="app-title">whisper-z</h1>
         <button class="help-btn" @click="showHelp = true" aria-label="Help" title="Help">
           ? Help
         </button>
       </div>
     </header>
 
-    <!-- TODO: Your app content goes here -->
     <div class="content">
-      <p>Welcome! Replace this with your app content.</p>
-      <p>Start by customizing the references in CLAUDE.md and describing what you want to build.</p>
+      <ChatHome v-if="route.name === 'home'" />
+      <JoinChat v-else-if="route.name === 'join'" :session-id="route.sessionId" />
+      <ChatView
+        v-else-if="route.name === 'chat'"
+        :key="`${route.sessionId}:${route.role}`"
+        :session-id="route.sessionId"
+        :role="route.role"
+        :packed-key="route.packedKey"
+      />
     </div>
 
     <footer class="debug">

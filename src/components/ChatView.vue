@@ -197,13 +197,19 @@ function goHome() {
 
 .home-link {
   align-self: flex-start;
-  padding: 0.3rem 0.1rem;
+  padding: 0.4rem 0.8rem;
   min-height: 44px;
-  background: none;
-  border: none;
-  color: var(--accent-blue);
-  font-size: 0.9rem;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  color: var(--text);
+  font-size: 0.85rem;
   font-weight: 600;
+}
+
+.home-link:hover {
+  color: var(--text);
+  border-color: var(--accent-blue);
 }
 
 .waiting {

@@ -125,6 +125,18 @@ async function send() {
   }
 }
 
+// A coarse pointer means touch is the primary input — on those devices Enter
+// should only ever insert a newline (mobile keyboards have no reliable
+// Shift+Enter), and the Send button is the only way to send. With a fine
+// pointer (desktop), Enter sends and Shift+Enter inserts a newline.
+const isTouchDevice = window.matchMedia('(pointer: coarse)').matches
+
+function onComposerKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Enter' || isTouchDevice || e.shiftKey) return
+  e.preventDefault()
+  send()
+}
+
 async function copyInvite() {
   if (await copyToClipboard(inviteLink.value)) {
     copiedInvite.value = true
@@ -169,7 +181,7 @@ function goHome() {
           v-model="draft"
           rows="1"
           placeholder="Message…"
-          @keydown.enter.exact.prevent="send"
+          @keydown="onComposerKeydown"
         ></textarea>
         <button type="submit" :disabled="!draft.trim() || sending">Send</button>
       </form>

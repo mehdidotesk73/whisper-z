@@ -56,6 +56,20 @@ type-check until both agree.
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.3.0 — 2026-08-27 (Stage 1 of 2)
+- **Added:** Optional accounts — an account is a keypair + username, same custody model as a chat
+  (an account link carries the private key, no password), plus this device remembers it in
+  `localStorage` until logged out. `AccountHome.vue` shows a chat list instead of one link per chat.
+- **Key insight:** attaching a chat to an account needed no new crypto — `wrapPrivateKey`/
+  `unwrapPrivateKey` in `src/lib/crypto.ts` reuse the same ECDH+AES-GCM primitives from v0.2.0,
+  applied to "encrypt a key" instead of "encrypt a message." See §3b in `docs/system-design.md`.
+- **Refactor:** starting/joining a chat is now one shared function (`src/api/chatActions.ts`) used
+  by `ChatHome`, `JoinChat`, and `AccountHome` alike, so "attach automatically if logged in" lives in
+  one place instead of three.
+- **Deferred to stage 2:** starting a chat directed at someone's public key (no invite-link
+  round-trip) with an accept step before they can respond. Schema (`chat_memberships.status`) is
+  already in place; the code isn't yet.
+
 ### v0.2.0 — 2026-08-23
 - **Added:** The core encrypted chat flow — Start a chat / Join a chat / Chat view, wired to a
   hash-based router (no `vue-router` needed for three screens)

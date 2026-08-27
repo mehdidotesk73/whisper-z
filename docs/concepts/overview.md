@@ -25,6 +25,32 @@ standard Diffie-Hellman key exchange. Every message is encrypted with that key b
 decrypted locally when it arrives. Until the other person joins, you'll see "waiting for the other
 person to join."
 
+## Accounts (optional)
+
+Without an account, every chat lives in its own personal link — fine for one conversation, awkward
+for several. An account gives you a chat list instead.
+
+**Creating one** works the same way as starting a chat: your browser generates a keypair, you pick a
+username (just a label other people see — not a login, not secret), and you get an **account
+link**. That link is your only way in — there's no password. Save it like you would a chat's
+personal link.
+
+Once you've opened your account link on a device, that device remembers you (until you tap **Log
+out**), so you won't need to paste it again there. Logging in anywhere else still needs the link.
+
+**Your chats stay in one list.** Starting or joining a chat while logged in adds it automatically —
+no extra link to save. Already have a chat from before you had an account? Paste its personal link
+into **Add an existing chat** and it joins the list too. Either way it's the exact same chat
+underneath; an account just remembers which ones are yours.
+
+**The other side of a chat shows as a username if they have an account, or "Not on an account yet"
+if they don't** — chatting works the same either way, this just affects what shows in your list.
+
+**Same recovery trade-off as a chat's personal link, at a bigger scale.** Lose your account link (or
+clear this browser's storage without having it saved elsewhere) and every chat in that account is
+gone for good — the same "no password recovery" trade-off as a single chat, just covering
+everything in the account at once.
+
 ## What this protects, and what it doesn't
 
 - **Message content is unreadable to the server and the database** — they only ever see ciphertext.
@@ -58,7 +84,10 @@ logs"), copy it and include that too — it helps debug issues.
 **Q: What data is stored, and where?**
 
 A: Encrypted messages and each side's public key live in a shared database (Supabase), so both
-devices can sync. Private keys never leave your browser — they exist only in your personal link.
+devices can sync. Private keys never leave your browser — they exist only in your personal link (or,
+if you have an account, encrypted under your account's key so only you can read them back). If
+you've logged into an account on this device, that login is remembered in this browser's local
+storage until you log out.
 
 ---
 

@@ -13,15 +13,26 @@ subscriptions) so two separate browsers can actually hold a conversation. Key fu
 `generateKeyPair`/`deriveSharedKey`/`encryptText`/`decryptText` (`src/lib/crypto.ts`),
 `createSession`/`joinSession`/`subscribeMessages` (`src/api/session.ts`).
 
+**Accounts, stage 1** (v0.3.0) — optional account layer on top of the same chat system: an account
+is a keypair + username (no password, an account link carries the private key, remembered in this
+device's `localStorage` until logged out). Starting/joining a chat while logged in attaches it
+automatically; an existing chat's personal link can be pasted in to attach it too. Attaching wraps
+the chat's private key under the account's public key, reusing the same ECDH+AES-GCM primitives as
+messages (`wrapPrivateKey`/`unwrapPrivateKey`). `AccountHome.vue` shows the resulting chat list.
+Schema: `accounts`, `chat_memberships` — see §3b in `docs/system-design.md`.
+
 ## Next (Current Sprint)
+
+**Accounts, stage 2** — starting a chat directed at someone's public key (shared out-of-band, not
+looked up by username — usernames are just a display label, not a directory) instead of the
+invite-link round-trip. The starter can send immediately; the recipient only sees/can respond to it
+after accepting. `chat_memberships.status` (`active`/`pending`) is already in the schema for this.
 
 One-time setup — tick these off as they're done:
 
 - [x] Connect Netlify (finish-setup) — required; gives previews AND the production site
 - [x] Protect `main` (finish-setup) — required; makes changes arrive as PRs with previews
 - [x] First feature: the core encrypted chat flow
-
-(What's next?)
 
 ## Code
 
@@ -33,6 +44,8 @@ One-time setup — tick these off as they're done:
 - No forward secrecy — keys are static per session, so one compromised private key decrypts the
   whole history. A Double Ratchet–style rotation would be a much bigger build
 - Group chat isn't supported — the schema and key derivation are both pairwise by design
+- Account login is link-only, no password — noted as upgradeable later (wrap the same account key
+  under a password-derived key instead of/alongside the link) without touching anything else
 
 ## Docs
 

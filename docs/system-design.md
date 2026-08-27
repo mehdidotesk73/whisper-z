@@ -9,14 +9,17 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 - **Header/footer shell** — app title, Help modal, build/version info, reload affordance, debug panel
 - **Service-worker caching** — offline capability, smart update detection
 - **Mobile-first UX** — responsive, touch-optimized, no hover-only interactions
-- **Three screens** (`src/components/ChatHome.vue`, `JoinChat.vue`, `ChatView.vue`), switched by a
-  hash-based router (`src/lib/route.ts`) — no `vue-router`, just enough parsing for three states
-- **Pure computation layer** (`src/lib/`) — key agreement, encrypt/decrypt, routing, clipboard
-- **Data layer** (`src/api/`) — the Supabase client and session/message reads, writes, and realtime
-  subscriptions
+- **Four screens** (`src/components/ChatHome.vue`, `JoinChat.vue`, `ChatView.vue`,
+  `AccountHome.vue`), switched by a hash-based router (`src/lib/route.ts`) — no `vue-router`, just
+  enough parsing for four states
+- **Pure computation layer** (`src/lib/`) — key agreement, key wrapping, encrypt/decrypt, routing,
+  clipboard, login state
+- **Data layer** (`src/api/`) — the Supabase client, session/message/account/membership reads,
+  writes, and realtime subscriptions
 - **Hot reload in dev** — instant feedback on code changes
 - **Netlify** — production site and a live preview on every branch/PR, one host
-- **Supabase** — shared Postgres database so two browsers can sync a conversation; see §3a
+- **Supabase** — shared Postgres database so two browsers can sync a conversation; see §3a. Accounts
+  are an optional attachment layer over the same chat system; see §3b
 
 ### Architecture Diagram
 
@@ -31,20 +34,28 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 │  │  ├─ HelpModal                     │  │
 │  │  ├─ DebugPanel                    │  │
 │  │  ├─ UpdateAvailablePrompt         │  │
-│  │  └─ route.ts picks one of:        │  │
-│  │      ChatHome │ JoinChat │ ChatView│ │
+│  │  └─ route.ts + currentAccount:    │  │
+│  │      AccountHome (logged in) or   │  │
+│  │      ChatHome │ JoinChat│ChatView │  │
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
 │  │  lib/ (pure functions)            │  │
-│  │  ├─ crypto.ts (ECDH + AES-GCM)    │  │
+│  │  ├─ crypto.ts (ECDH + AES-GCM +   │  │
+│  │  │   key wrapping)                │  │
 │  │  ├─ route.ts (hash router)        │  │
+│  │  ├─ auth.ts (login state, local-  │  │
+│  │  │   Storage credential)          │  │
 │  │  └─ clipboard.ts                  │  │
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
 │  │  api/ (Supabase data access)      │  │
 │  │  ├─ supabase.ts (client)          │  │
-│  │  └─ session.ts (reads/writes/     │  │
-│  │      realtime subscriptions)      │  │
+│  │  ├─ session.ts, account.ts        │  │
+│  │  │   (reads/writes/realtime)      │  │
+│  │  ├─ chatActions.ts (start/join,   │  │
+│  │  │   shared by every entry point) │  │
+│  │  └─ chatList.ts (assembles the    │  │
+│  │      account's chat list)         │  │
 │  └───────────────────────────────────┘  │
 └──────────────────┬──────────────────────┘
                     │ ciphertext + public keys only
@@ -52,6 +63,7 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 ┌─────────────────────────────────────────┐
 │   Supabase (Postgres + Realtime)        │
 │   sessions, messages — see §3a          │
+│   accounts, chat_memberships — see §3b  │
 └─────────────────────────────────────────┘
 ```
 
@@ -128,6 +140,58 @@ count) is not hidden. There's no out-of-band key verification (no "safety number
 compromised or MITM'd first exchange isn't caught — acceptable for this app's scope, called out
 honestly in the Help doc rather than oversold.
 
+## §3b — Accounts: Optional Attachment Layer Over the Same Chat System
+
+Accounts don't replace anything in §3a — `sessions`/`messages` are unchanged, and a chat created or
+joined without an account works exactly as before. An account is purely an *index*: a way to find
+your chats without saving one link per chat, built from two more tables:
+
+```sql
+accounts (id uuid pk, username text unique, public_key text, created_at)
+chat_memberships (
+  id uuid pk, account_id fk → accounts, session_id fk → sessions,
+  role 'starter'|'joiner', title text, wrapped_private_key text nullable,
+  wrap_iv text nullable, status 'active'|'pending' (unused until a later chat-creation
+  method needs it), created_at, unique (account_id, session_id)
+)
+```
+
+**Account identity is a keypair, same shape as a chat's.** Creating an account
+(`CreateAccount.vue`) generates an ECDH keypair exactly like starting a chat does — the public key
+is stored on the `accounts` row, the private key is packed into an **account link**
+(`#/account/<id>/<packedKey>`) the same way a chat's personal link works. There's no password and
+no recovery: the account link *is* the credential. The one difference from a chat link: once
+consumed, the packed key is also saved to this browser's `localStorage` (`src/lib/auth.ts`), so
+reopening the app doesn't require re-pasting it — "Log out" clears that storage; logging back in
+still needs the link.
+
+**Attaching a chat wraps its private key under the account's public key — no new crypto.** This
+reuses the exact ECDH+AES-GCM primitives from §3a, applied to "encrypt a key" instead of "encrypt a
+message": `wrapPrivateKey`/`unwrapPrivateKey` in `src/lib/crypto.ts` derive the same shared secret
+either direction — `deriveSharedKey(chat's own private key, account's public key)` at attach time
+equals `deriveSharedKey(account's private key, chat's own public key)` at load time, since ECDH is
+symmetric. The chat's own public key needed for the second computation is already sitting on the
+`sessions` row, so unwrapping needs no extra storage.
+
+**Attachment happens two ways, and they're the same primitive.** Starting or joining a chat while
+logged in wraps and attaches automatically (`src/api/chatActions.ts`, `attachIfLoggedIn`) — no
+separate save step. Pasting an existing personal link into the "Add an existing chat" box in
+`AccountHome.vue` does the identical wrap-and-insert by hand. There is no "old chat" vs "new chat"
+distinction anywhere in the schema; `chat_memberships` is just "this account currently holds this
+chat's key," attachable at any point in a chat's life.
+
+**Chat list rows are assembled, not stored.** `src/api/chatList.ts`'s `buildChatListItem` composes,
+per membership: the session row (for the other side's public key), a reverse lookup by that public
+key into `accounts` (for their username, if they have one — "Not on an account yet" if not, since
+the other party may never have created an account), and the unwrapped private key (so the row is
+directly tappable into `ChatView`).
+
+**Enumerability, restated for this table.** Same caveat as `sessions`/`messages`: `using (true)`
+means anyone with the project URL and key can list every row, not just their own. `wrapped_private_key`
+is genuinely useless without the matching account's private key; `username` and `public_key` are
+plaintext, so the username "directory" this creates is technically enumerable even though nothing
+in the UI searches it — worth knowing, not worth solving here.
+
 ## §4 — Shared Logic (lib/)
 
 Pure functions over already-fetched data. These recompute instantly, no refetch. Example:
@@ -165,7 +229,9 @@ Organized by feature. Keep them thin — mostly templating, logic lives in `lib/
 ```
 src/components/
   HelpModal.vue      renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
-  ChatHome.vue        "Start a chat" + the created session's personal/invite links
+  ChatHome.vue        logged-out home: "Start a chat" / paste a link / "Create an account"
+  CreateAccount.vue   username + keypair generation, shows the account link once
+  AccountHome.vue     logged-in home: chat list, start a new chat, attach an existing one
   JoinChat.vue        "Join chat" via an invite link + the joiner's own personal link
   ChatView.vue        waiting state, decrypted thread, composer
 ```

@@ -56,6 +56,12 @@ type-check until both agree.
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.2.1 — 2026-08-23
+- **Fixed:** The message composer's Enter key sent on every platform, including mobile, where
+  there's no reliable Shift+Enter. Now branches on `matchMedia('(pointer: coarse)')`: touch devices
+  always treat Enter as a newline (Send button is the only way to send); desktop sends on Enter and
+  inserts a newline on Shift+Enter.
+
 ### v0.2.0 — 2026-08-23
 - **Added:** The core encrypted chat flow — Start a chat / Join a chat / Chat view, wired to a
   hash-based router (no `vue-router` needed for three screens)

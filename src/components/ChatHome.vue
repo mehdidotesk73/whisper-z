@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { generateKeyPair, exportPublicKey, exportPrivateKey, jwkToUrlSafe } from '../lib/crypto'
-import { createSession } from '../api/session'
+import { startNewChat } from '../api/chatActions'
+import { currentAccount } from '../lib/auth'
 import { chatHash, inviteHash, navigate, parseHash, extractHash } from '../lib/route'
 import { copyToClipboard } from '../lib/clipboard'
 import { logDebug } from '../debug'
+import CreateAccount from './CreateAccount.vue'
 
 const starting = ref(false)
 const failed = ref(false)
@@ -13,6 +14,7 @@ const inviteLink = ref('')
 const chatDestination = ref('')
 const copiedPersonal = ref(false)
 const copiedInvite = ref(false)
+const showCreateAccount = ref(false)
 
 const pastedLink = ref('')
 const pasteError = ref('')
@@ -33,23 +35,16 @@ async function startChat() {
   starting.value = true
   failed.value = false
   try {
-    const keyPair = await generateKeyPair()
-    const [publicKey, privateKey] = await Promise.all([
-      exportPublicKey(keyPair.publicKey),
-      exportPrivateKey(keyPair.privateKey),
-    ])
-
-    const sessionId = await createSession(publicKey)
-    if (!sessionId) {
+    const result = await startNewChat(currentAccount.value)
+    if (!result) {
       failed.value = true
       return
     }
 
-    const packedKey = jwkToUrlSafe(privateKey)
     const base = `${location.origin}${location.pathname}`
-    chatDestination.value = chatHash(sessionId, 'starter', packedKey)
+    chatDestination.value = chatHash(result.sessionId, 'starter', result.packedKey)
     personalLink.value = `${base}${chatDestination.value}`
-    inviteLink.value = `${base}${inviteHash(sessionId)}`
+    inviteLink.value = `${base}${inviteHash(result.sessionId)}`
   } catch (err) {
     logDebug(`startChat failed: ${err}`, 'error')
     failed.value = true
@@ -79,7 +74,9 @@ function goToChat() {
 
 <template>
   <div class="home">
-    <template v-if="!personalLink">
+    <CreateAccount v-if="showCreateAccount" @back="showCreateAccount = false" />
+
+    <template v-else-if="!personalLink">
       <p class="intro">
         Start an end-to-end encrypted chat. Your keys are generated in this browser and never sent
         anywhere — only you can read your messages.
@@ -94,8 +91,8 @@ function goToChat() {
       <div class="divider"><span>or</span></div>
 
       <div class="link-block">
-        <label>Go to a chat</label>
-        <p class="hint">Paste a personal or invite link you saved, and it'll take you there.</p>
+        <label>Go to a chat or account</label>
+        <p class="hint">Paste a link you saved, and it'll take you there.</p>
         <div class="link-row">
           <input
             v-model="pastedLink"
@@ -106,6 +103,14 @@ function goToChat() {
         </div>
         <p v-if="pasteError" class="error">{{ pasteError }}</p>
       </div>
+
+      <div class="divider"><span>or</span></div>
+
+      <button class="secondary" @click="showCreateAccount = true">Create an account</button>
+      <p class="hint">
+        Keeps all your chats in one list instead of one link per chat. Optional — everything above
+        works without one.
+      </p>
     </template>
 
     <template v-else>
@@ -160,6 +165,21 @@ function goToChat() {
 
 .primary:disabled {
   opacity: 0.6;
+}
+
+.secondary {
+  padding: 0.65rem 1rem;
+  min-height: 44px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.secondary:hover {
+  border-color: var(--accent-blue);
 }
 
 .error {

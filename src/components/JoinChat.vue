@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { generateKeyPair, exportPublicKey, exportPrivateKey, jwkToUrlSafe } from '../lib/crypto'
-import { joinSession } from '../api/session'
+import { joinExistingChat } from '../api/chatActions'
+import { currentAccount } from '../lib/auth'
 import { chatHash, navigate } from '../lib/route'
 import { copyToClipboard } from '../lib/clipboard'
 import { logDebug } from '../debug'
@@ -20,20 +20,17 @@ async function join() {
   failed.value = false
   alreadyTaken.value = false
   try {
-    const keyPair = await generateKeyPair()
-    const [publicKey, privateKey] = await Promise.all([
-      exportPublicKey(keyPair.publicKey),
-      exportPrivateKey(keyPair.privateKey),
-    ])
-
-    const ok = await joinSession(props.sessionId, publicKey)
-    if (!ok) {
+    const result = await joinExistingChat(props.sessionId, currentAccount.value)
+    if (result === 'taken') {
       alreadyTaken.value = true
       return
     }
+    if (!result) {
+      failed.value = true
+      return
+    }
 
-    const packedKey = jwkToUrlSafe(privateKey)
-    chatDestination.value = chatHash(props.sessionId, 'joiner', packedKey)
+    chatDestination.value = chatHash(result.sessionId, 'joiner', result.packedKey)
     personalLink.value = `${location.origin}${location.pathname}${chatDestination.value}`
   } catch (err) {
     logDebug(`join failed: ${err}`, 'error')

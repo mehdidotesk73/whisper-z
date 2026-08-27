@@ -1,12 +1,35 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import HelpModal from './components/HelpModal.vue'
 import ChatHome from './components/ChatHome.vue'
 import JoinChat from './components/JoinChat.vue'
 import ChatView from './components/ChatView.vue'
+import AccountHome from './components/AccountHome.vue'
 import { debugState, logDebug, logAsText } from './debug'
 import { reloadLatest } from './pwa'
-import { route } from './lib/route'
+import { route, navigateReplace, homeHash } from './lib/route'
+import { currentAccount, loadStoredCredential, loginWithCredential } from './lib/auth'
+
+// An account link logs in, then gets consumed immediately — the private key
+// it carries shouldn't linger in the visible URL or back-history once it's
+// saved to this device's storage.
+async function handleAccountRoute() {
+  if (route.value.name !== 'account') return
+  const { accountId, packedKey } = route.value
+  const ok = await loginWithCredential(accountId, packedKey)
+  if (!ok) logDebug('Account link did not resolve to a real account', 'warn')
+  navigateReplace(homeHash)
+}
+
+onMounted(async () => {
+  await handleAccountRoute()
+  if (!currentAccount.value) {
+    const stored = loadStoredCredential()
+    if (stored) await loginWithCredential(stored.id, stored.packedKey)
+  }
+})
+
+watch(route, handleAccountRoute)
 
 const buildId = __BUILD_ID__
 const buildTime = __BUILD_TIME__
@@ -105,7 +128,10 @@ onMounted(() => {
     </header>
 
     <div class="content">
-      <ChatHome v-if="route.name === 'home'" />
+      <template v-if="route.name === 'home'">
+        <AccountHome v-if="currentAccount" :key="currentAccount.id" />
+        <ChatHome v-else />
+      </template>
       <JoinChat v-else-if="route.name === 'join'" :session-id="route.sessionId" />
       <ChatView
         v-else-if="route.name === 'chat'"

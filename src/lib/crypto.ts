@@ -71,6 +71,40 @@ function base64ToBuf(b64: string): ArrayBuffer {
   return bytes.buffer
 }
 
+/**
+ * Wraps a chat's private key so an account can hold it in the database.
+ * Reuses the same ECDH+AES-GCM primitives above, applied to "a key" instead
+ * of "a message" — the wrap key is `deriveSharedKey(myPrivateKey,
+ * theirPublicKey)`, computable by either side of that pair. Called at
+ * attach time with the chat's own freshly-generated keypair as `myPrivateKey`
+ * and the account's public key as `theirPublicKey`.
+ */
+export async function wrapPrivateKey(
+  keyToWrap: JsonWebKey,
+  myPrivateKey: CryptoKey,
+  theirPublicKey: CryptoKey,
+): Promise<EncryptedPayload> {
+  const wrapKey = await deriveSharedKey(myPrivateKey, theirPublicKey)
+  return encryptText(wrapKey, JSON.stringify(keyToWrap))
+}
+
+/**
+ * Reverses `wrapPrivateKey`. Called with the account's own private key as
+ * `myPrivateKey` and the chat's own public key (already public, sitting on
+ * the session row) as `theirPublicKey` — the ECDH symmetry means this
+ * recovers the same wrap key without the account ever seeing the chat's
+ * private key over the wire.
+ */
+export async function unwrapPrivateKey(
+  payload: EncryptedPayload,
+  myPrivateKey: CryptoKey,
+  theirPublicKey: CryptoKey,
+): Promise<JsonWebKey> {
+  const wrapKey = await deriveSharedKey(myPrivateKey, theirPublicKey)
+  const json = await decryptText(wrapKey, payload)
+  return JSON.parse(json)
+}
+
 /** Pack a JWK into a URL-safe string, for embedding a private key in a link fragment. */
 export function jwkToUrlSafe(jwk: JsonWebKey): string {
   return btoa(JSON.stringify(jwk)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')

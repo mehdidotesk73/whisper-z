@@ -8,6 +8,7 @@ export type Route =
   | { name: 'home' }
   | { name: 'join'; sessionId: string }
   | { name: 'chat'; sessionId: string; role: Role; packedKey: string }
+  | { name: 'account'; accountId: string; packedKey: string }
 
 export function parseHash(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean)
@@ -18,6 +19,9 @@ export function parseHash(hash: string): Route {
   if (parts[0] === 'chat' && parts[1] && parts[2] && parts[3]) {
     const role: Role = parts[2] === 'joiner' ? 'joiner' : 'starter'
     return { name: 'chat', sessionId: parts[1], role, packedKey: parts[3] }
+  }
+  if (parts[0] === 'account' && parts[1] && parts[2]) {
+    return { name: 'account', accountId: parts[1], packedKey: parts[2] }
   }
   return { name: 'home' }
 }
@@ -45,12 +49,26 @@ export function navigate(hash: string) {
   window.location.hash = hash
 }
 
+/**
+ * Like `navigate`, but doesn't add a history entry — used right after
+ * consuming an account link, so the private key it carried doesn't linger
+ * in back-history once it's saved to this device.
+ */
+export function navigateReplace(hash: string) {
+  history.replaceState(null, '', hash)
+  route.value = parseHash(hash)
+}
+
 export function chatHash(sessionId: string, role: Role, packedKey: string): string {
   return `#/chat/${sessionId}/${role}/${packedKey}`
 }
 
 export function inviteHash(sessionId: string): string {
   return `#/join/${sessionId}`
+}
+
+export function accountHash(accountId: string, packedKey: string): string {
+  return `#/account/${accountId}/${packedKey}`
 }
 
 export const homeHash = '#/'

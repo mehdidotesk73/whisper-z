@@ -40,6 +40,7 @@ const messages = ref<DecodedMessage[]>([])
 const draft = ref('')
 const sending = ref(false)
 const scrollAnchor = ref<HTMLElement>()
+const composerTextarea = ref<HTMLTextAreaElement>()
 const inviteLink = computed(() => `${location.origin}${location.pathname}#/join/${props.sessionId}`)
 const copiedInvite = ref(false)
 
@@ -119,10 +120,36 @@ async function send() {
   try {
     const { ciphertext, iv } = await encryptText(sharedKey, text)
     const ok = await sendMessage(props.sessionId, props.role, ciphertext, iv)
-    if (ok) draft.value = ''
+    if (ok) {
+      draft.value = ''
+      await nextTick()
+      resizeComposer()
+    }
   } finally {
     sending.value = false
   }
+}
+
+// Grows the textarea to fit its content, capped by the CSS max-height
+// (50vh) — resetting to 'auto' first lets scrollHeight shrink back down
+// when text is removed, not just grow.
+function resizeComposer() {
+  const el = composerTextarea.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${el.scrollHeight}px`
+}
+
+// A coarse pointer means touch is the primary input — on those devices Enter
+// should only ever insert a newline (mobile keyboards have no reliable
+// Shift+Enter), and the Send button is the only way to send. With a fine
+// pointer (desktop), Enter sends and Shift+Enter inserts a newline.
+const isTouchDevice = window.matchMedia('(pointer: coarse)').matches
+
+function onComposerKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Enter' || isTouchDevice || e.shiftKey) return
+  e.preventDefault()
+  send()
 }
 
 async function copyInvite() {
@@ -166,10 +193,12 @@ function goHome() {
 
       <form class="composer" @submit.prevent="send">
         <textarea
+          ref="composerTextarea"
           v-model="draft"
           rows="1"
           placeholder="Message…"
-          @keydown.enter.exact.prevent="send"
+          @keydown="onComposerKeydown"
+          @input="resizeComposer"
         ></textarea>
         <button type="submit" :disabled="!draft.trim() || sending">Send</button>
       </form>
@@ -299,7 +328,8 @@ function goHome() {
   flex: 1;
   resize: none;
   min-height: 44px;
-  max-height: 8rem;
+  max-height: 50vh;
+  overflow-y: auto;
   padding: 0.6rem;
   border: 1px solid var(--border);
   border-radius: 0.6rem;

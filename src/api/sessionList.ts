@@ -22,8 +22,12 @@ export async function fetchSessionList(account: CurrentAccount): Promise<Session
   for (const row of rows) {
     try {
       const payload = await openSealed<SessionAccessPayload>(toEnvelope(row), account.privateKey)
+      // A migrated guest session pins this account to its original guest
+      // public key for this one session (see migrateGuestSessionToAccount)
+      // — that, not the account's real key, is "me" when excluding others.
+      const myIdForSession = payload.identityPublicKeyId ?? account.publicKeyId
       const participants = await fetchParticipants(payload.sessionId)
-      const others = participants.filter((p) => p.public_key !== account.publicKeyId)
+      const others = participants.filter((p) => p.public_key !== myIdForSession)
 
       const linkedAccounts = await fetchAccountsByPublicKeys(others.map((p) => p.public_key))
       const usernameByKey = new Map(linkedAccounts.map((a) => [a.public_key, a.username]))

@@ -30,7 +30,7 @@ import type { CurrentAccount } from '../lib/auth'
  * each visit generates a brand new keypair, so it can never already hold
  * access to anything.
  */
-async function alreadyHasAccess(account: CurrentAccount, sessionId: string): Promise<boolean> {
+export async function alreadyHasAccess(account: CurrentAccount, sessionId: string): Promise<boolean> {
   const ownerPub = await deriveLookupTag(account.privateKey, 'session-access')
   const rows = await fetchSessionAccessForOwner(ownerPub)
   for (const row of rows) {
@@ -112,4 +112,35 @@ export async function joinExistingSession(
 
   const packedKey = account ? null : packJwk(await exportPrivateKey(identity.privateKey))
   return { sessionId: joinPayload.sessionId, packedKey }
+}
+
+/**
+ * Adds an account's own access to a session it currently only holds as a
+ * guest (via a personal link) — without touching session_participants or
+ * re-keying anything. The account's copy of session_access is sealed with
+ * `identityPublicKeyId` pinned to the guest's original public key, so this
+ * session keeps presenting as that one identity forever: old messages (sent
+ * under the guest key, immutably) and any new ones sent after migration
+ * both resolve against the exact same, untouched participant row. The
+ * account's own real public key never needs to appear in this session at
+ * all. Idempotent — migrating twice just confirms access already exists.
+ */
+export async function migrateGuestSessionToAccount(
+  sessionId: string,
+  sessionKeyJwk: JsonWebKey,
+  role: 'owner' | 'member',
+  guestPublicKeyId: string,
+  account: CurrentAccount,
+): Promise<boolean> {
+  if (await alreadyHasAccess(account, sessionId)) return true
+
+  const payload: SessionAccessPayload = {
+    sessionId,
+    sessionKey: sessionKeyJwk,
+    role,
+    identityPublicKeyId: guestPublicKeyId,
+  }
+  const sealed = await sealForRecipient(payload, account.publicKey)
+  const ownerPub = await deriveLookupTag(account.privateKey, 'session-access')
+  return insertSessionAccess(ownerPub, sealed)
 }

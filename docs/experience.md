@@ -125,6 +125,25 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 - **Added:** `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) — adds an account's own
   `session_access` row to a session it currently only holds as a guest, plus a new
   `session_participants` row for the account's real key; the guest's original row is never touched
+- **Fixed (found in live device testing, 3-tab scenario):** an account that had already joined a
+  session *directly* under its own key, then separately used "+ Add to account" to migrate in a
+  *different* guest identity that also participated in the same session, never actually recognized
+  that guest's old messages as its own. Root cause: `migrateGuestSessionToAccount`'s idempotency guard
+  (`alreadyHasAccess`) treated "the account already has *some* row for this session" as "this guest
+  identity is already migrated," and returned early without ever writing the pin — so the guest's key
+  was never added anywhere the account's client could learn about it. Fixed by replacing the single
+  `identityPublicKeyId` field with an `identityPublicKeyIds` array, merged into whatever access row
+  the account already has for that session (updated in place via a new `updateSessionAccess`) instead
+  of always inserting a fresh row and gating on a too-coarse existence check. Also added
+  `isIdentityMerged` (checks whether *this specific* guest key is in the array, for the "+ Add to
+  account"/Warning visibility check — narrower than `alreadyHasAccess`, which is still correct for its
+  original use, preventing an account from double-joining under its own key) and a `hasParticipant`
+  guard so migrating never inserts a duplicate `session_participants` row when the account already has
+  one from a direct join. Verified with a standalone script reproducing the exact reported scenario:
+  after migration the account still has exactly one `session_access` row (merged, not duplicated), its
+  `myKeys` set includes both its own key and the merged guest key, and participant rows stay at exactly
+  one-per-identity. See "An account can migrate a guest session it already holds" in
+  `docs/system-design.md` §3
 - **Fixed a real, already-shipped vulnerability, found through the user's own architecture review of
   this table:** `session_participants.public_key` stored an account's real public key in plaintext.
   Because an account reuses that same key across every session it joins, and RLS is `using (true)`,

@@ -28,23 +28,30 @@ for account holders in the thread. See the "account is just another identity" + 
 link isn't enough" entries in `docs/system-design.md` §3.
 
 **Stage C: guest → account migration** (pending) — `migrateGuestSessionToAccount`
-(`src/api/sessionActions.ts`) adds an account's own `session_access` row to a session it currently
-only holds as a guest, without touching the guest's original `session_participants` row or re-keying
-anything, then adds a **new** participant row for the account's real key and sends future messages
-under that key. A message's displayed sender name is never stored anywhere — resolved live, purely
-from `sender`, against `accounts`, with a deterministic (no-lookup) fallback name derived from the
-key itself (`guestNameForKey`, `src/lib/guestName.ts`) for a key that isn't one. That's what makes a
-migrated identity's *later* messages correctly show the account's current username to everyone else
-while its *earlier* ones keep resolving to the same guest name they always did — nothing here treats
-"migrated" as a special case anywhere in the render path. Also fixed, found through the user's own
-review of the table's design: `session_participants` used to store an account's real public key in
-plaintext, which — combined with `using (true)` RLS — let anyone with database access recover which
-sessions an account has ever joined directly, defeating `session_access`'s whole hidden-membership-
-graph design for every account (not guests). Each row's identity is now symmetrically encrypted with
-the session's own shared key instead (same functions `messages` already uses), leaving only
-`session_id` as plaintext lookup metadata. See "An account can migrate a guest session it already
-holds", "A message's displayed sender name is resolved live", and "`session_participants` is keyed by
-plaintext `session_id`" in `docs/system-design.md` §3.
+(`src/api/sessionActions.ts`) merges a guest identity's key into `identityPublicKeyIds`, an array on
+the account's own `session_access` row for that session — creating that row if the account doesn't
+have one yet, or updating it in place (via `updateSessionAccess`) if it already does, rather than
+always inserting a second row for the same session. The guest's original `session_participants` row
+is never touched; a new one is added for the account's real key only if it doesn't already have one.
+Future messages are sent under that real key. A message's displayed sender name is never stored
+anywhere — resolved live, purely from `sender`, against `accounts`, with a deterministic (no-lookup)
+fallback name derived from the key itself (`guestNameForKey`, `src/lib/guestName.ts`) for a key that
+isn't one. That's what makes a migrated identity's *later* messages correctly show the account's
+current username to everyone else while its *earlier* ones keep resolving to the same guest name they
+always did — nothing here treats "migrated" as a special case anywhere in the render path. Also fixed:
+(1) found through the user's own review of the table's design — `session_participants` used to store
+an account's real public key in plaintext, which — combined with `using (true)` RLS — let anyone with
+database access recover which sessions an account has ever joined directly, defeating
+`session_access`'s whole hidden-membership-graph design for every account (not guests); each row's
+identity is now symmetrically encrypted with the session's own shared key instead (same functions
+`messages` already uses), leaving only `session_id` as plaintext lookup metadata. (2) found through
+live device testing — an account that had already joined a session directly under its own key, then
+migrated in a *different* guest identity from the same session, never actually recognized that
+guest's old messages as its own, because the old single-key `identityPublicKeyId` field and its
+too-coarse idempotency check silently no-opped instead of merging; fixed by the array + merge-in-place
+design described above. See "An account can migrate a guest session it already holds", "A message's
+displayed sender name is resolved live", and "`session_participants` is keyed by plaintext
+`session_id`" in `docs/system-design.md` §3.
 
 ## Next (Current Sprint)
 

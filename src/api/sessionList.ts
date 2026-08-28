@@ -23,10 +23,11 @@ export async function fetchSessionList(account: CurrentAccount): Promise<Session
   for (const row of rows) {
     try {
       const payload = await openSealed<SessionAccessPayload>(toEnvelope(row), account.privateKey)
-      // A migrated session has TWO rows that are "me": the account's real
-      // key (used going forward) and the pinned original guest key (used by
-      // messages sent before migration) — see migrateGuestSessionToAccount.
-      const myIds = new Set([account.publicKeyId, payload.identityPublicKeyId].filter(Boolean))
+      // A migrated session recognizes multiple sender keys as "me": the
+      // account's real key (used going forward) plus every guest key merged
+      // in via migrateGuestSessionToAccount (used by messages sent under
+      // those identities before migration).
+      const myIds = new Set([account.publicKeyId, ...(payload.identityPublicKeyIds ?? [])])
 
       // session_participants rows are encrypted with the session's shared
       // key (see docs/system-design.md §3) — decrypt each to recover the

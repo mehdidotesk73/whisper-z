@@ -28,7 +28,7 @@ import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
-import { alreadyHasAccess, migrateGuestSessionToAccount } from '../api/sessionActions'
+import { isIdentityMerged, migrateGuestSessionToAccount } from '../api/sessionActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
@@ -169,12 +169,14 @@ onMounted(async () => {
       // username for everyone. The pinned identityPublicKeyId (if any) only
       // extends "mine" to also cover messages sent before migration.
       ownPublicKeyId = currentAccount.value!.publicKeyId
-      myKeys = new Set([ownPublicKeyId, access.identityPublicKeyId].filter((k): k is string => !!k))
+      myKeys = new Set([ownPublicKeyId, ...(access.identityPublicKeyIds ?? [])])
     } else if (currentAccount.value) {
-      // Viewing a guest link while already logged in — check whether this
-      // session has already been migrated, so "Add to account" doesn't
-      // offer to redo something that's done.
-      migrated.value = await alreadyHasAccess(currentAccount.value, activeSessionId)
+      // Viewing a guest link while already logged in — check whether *this*
+      // guest identity specifically has already been merged in, so "Add to
+      // account" doesn't offer to redo something that's done. Narrower than
+      // "does the account have any access to this session at all": it might,
+      // from an unrelated direct join, without this guest visit being linked.
+      migrated.value = await isIdentityMerged(currentAccount.value, activeSessionId, ownPublicKeyId)
     }
 
     const existing = await fetchMessages(activeSessionId)

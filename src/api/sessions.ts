@@ -48,6 +48,25 @@ export async function insertSessionAccess(ownerPub: string, envelope: SealedEnve
   return true
 }
 
+/**
+ * Rewrites an existing session_access row's sealed payload in place — used
+ * to merge a newly migrated guest identity into a row an account already
+ * has for a session, rather than inserting a second row for the same
+ * session (see migrateGuestSessionToAccount in api/sessionActions.ts).
+ */
+export async function updateSessionAccess(id: string, envelope: SealedEnvelope): Promise<boolean> {
+  const { error } = await supabase
+    .from('session_access')
+    .update({ ciphertext: envelope.ciphertext, iv: envelope.iv, ephemeral_public_key: envelope.ephemeralPublicKey })
+    .eq('id', id)
+
+  if (error) {
+    logDebug(`updateSessionAccess failed: ${error.message}`, 'error')
+    return false
+  }
+  return true
+}
+
 export async function fetchSessionAccessForOwner(ownerPub: string): Promise<SessionAccessRow[]> {
   const { data, error } = await supabase.from('session_access').select('*').eq('owner_pub', ownerPub)
 

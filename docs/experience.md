@@ -121,6 +121,31 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.6.0 — 2026-08-28 (Stage C: guest → account migration)
+- **Added:** `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) — adds an account's own
+  `session_access` row to a session it currently only holds as a guest, plus a new
+  `session_participants` row for the account's real key; the guest's original row is never touched
+- **Added:** `+ Add to account` control on `SessionView.vue` (a guest-routed session only): one tap
+  if already logged in, or paste-an-account-link-and-log-in-then-migrate if not
+- **Redesigned (twice, after live testing) how a message's sender name is determined.** First pass
+  baked a `senderName` into each message at send time — fixed the reported "migrated identity's new
+  messages still show the old guest name" bug, but froze names as historical snapshots. Second pass,
+  prompted by a sharper design from live testing, replaced that with fully live resolution: a
+  message carries only `sender` (its public key); `SessionView.vue`'s `nameFor` resolves that key
+  against `accounts` every time, falling back to `guestNameForKey` — a deterministic, storage-free
+  name hashed from the key itself — when it isn't one. `session_participants.display_name` is now
+  unused everywhere; `sessionList.ts`'s chat-list preview uses the exact same resolution as the
+  thread, closing a gap the first pass had left open
+- **Added:** `guestNameForKey` (`src/lib/guestName.ts`) replaces `randomGuestName` — same word lists,
+  but deterministic (a hash of the public key, not `Math.random()`) so no name needs to be generated
+  or stored at join time at all, and a 3-character base36 suffix on top of color×noun to cut
+  collisions among many guest identities
+- **Added:** `truncateName` (`src/lib/guestName.ts`) — resolved names are capped at 20 characters
+  with a trailing `…` wherever the thread renders one, since an account's username is arbitrary length
+- See "An account can migrate a guest session it already holds" and "A message's displayed sender
+  name is resolved live" in `docs/system-design.md` §3 for the full design and why identity pinning
+  ended up scoped to "mine" detection only, never to what a message displays
+
 ### v0.5.0 — 2026-08-28 (Stage B: accounts + hidden session index)
 - **Added:** accounts (`src/api/accounts.ts`, `src/lib/auth.ts`) — a keypair + username identity
   that reuses the guest session-access mechanism verbatim, except the keypair is stable across

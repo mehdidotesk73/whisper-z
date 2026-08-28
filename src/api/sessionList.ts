@@ -4,6 +4,7 @@
 import { deriveLookupTag, openSealed } from '../lib/crypto'
 import { fetchSessionAccessForOwner, fetchParticipants, toEnvelope } from './sessions'
 import { fetchAccountsByPublicKeys } from './accounts'
+import { guestNameForKey } from '../lib/guestName'
 import type { SessionAccessPayload } from '../lib/sessionTypes'
 import type { CurrentAccount } from '../lib/auth'
 
@@ -22,16 +23,16 @@ export async function fetchSessionList(account: CurrentAccount): Promise<Session
   for (const row of rows) {
     try {
       const payload = await openSealed<SessionAccessPayload>(toEnvelope(row), account.privateKey)
-      // A migrated guest session pins this account to its original guest
-      // public key for this one session (see migrateGuestSessionToAccount)
-      // — that, not the account's real key, is "me" when excluding others.
-      const myIdForSession = payload.identityPublicKeyId ?? account.publicKeyId
+      // A migrated session has TWO rows that are "me": the account's real
+      // key (used going forward) and the pinned original guest key (used by
+      // messages sent before migration) — see migrateGuestSessionToAccount.
+      const myIds = new Set([account.publicKeyId, payload.identityPublicKeyId].filter(Boolean))
       const participants = await fetchParticipants(payload.sessionId)
-      const others = participants.filter((p) => p.public_key !== myIdForSession)
+      const others = participants.filter((p) => !myIds.has(p.public_key))
 
       const linkedAccounts = await fetchAccountsByPublicKeys(others.map((p) => p.public_key))
       const usernameByKey = new Map(linkedAccounts.map((a) => [a.public_key, a.username]))
-      const otherParticipants = others.map((p) => usernameByKey.get(p.public_key) ?? p.display_name ?? 'Someone')
+      const otherParticipants = others.map((p) => usernameByKey.get(p.public_key) ?? guestNameForKey(p.public_key))
 
       items.push({ sessionId: payload.sessionId, title: payload.title ?? null, role: payload.role, otherParticipants })
     } catch {

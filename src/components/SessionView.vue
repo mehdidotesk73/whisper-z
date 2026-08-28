@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   importPrivateKey,
   publicJwkFromPrivateJwk,
@@ -19,7 +19,6 @@ import {
   fetchMessages,
   sendMessage,
   subscribeMessages,
-  fetchParticipants,
   createJoinAccess,
   unsubscribe,
   toEnvelope,
@@ -28,7 +27,9 @@ import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/s
 import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
+import { fetchAccountByPublicKey } from '../api/accounts'
 import { alreadyHasAccess, migrateGuestSessionToAccount } from '../api/sessionActions'
+import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
@@ -42,7 +43,7 @@ const status = ref<Status>('loading')
 interface RenderedMessage {
   id: string
   mine: boolean
-  senderName: string
+  sender: string
   text: string
 }
 
@@ -56,11 +57,36 @@ const composerTextarea = ref<HTMLTextAreaElement>()
 let activeSessionId = ''
 let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
+// The identity used to SEND: a guest's one-off key, or an account's real
+// key (always — even for a migrated session, see onMounted below).
 let ownPublicKeyId = ''
 let ownRole: 'owner' | 'member' = 'member'
-// Only used as a fallback when not logged in — see the participants lookup
-// in onMounted below and the comment on DecodedMessage.senderName.
-let ownDisplayName = 'Someone'
+// Which sender keys count as "mine" for bubble styling — usually just
+// ownPublicKeyId, but a migrated session's account also privately
+// recognizes its old, pinned guest key as its own (see identityPublicKeyId
+// in lib/sessionTypes.ts).
+let myKeys = new Set<string>()
+
+// Sender display names are resolved per-message from `sender` alone, live
+// against `accounts`, with a deterministic (no-lookup) fallback for a key
+// that isn't one — see lib/guestName.ts and docs/system-design.md §3. This
+// is why a migrated identity's old messages keep the guest's name while
+// its new ones correctly show the account's current username: nothing
+// here treats them specially, both are just "resolve this sender key."
+const participantNames = reactive(new Map<string, string>())
+
+function nameFor(publicKeyId: string): string {
+  return truncateName(participantNames.get(publicKeyId) ?? guestNameForKey(publicKeyId))
+}
+
+function resolveName(publicKeyId: string) {
+  if (participantNames.has(publicKeyId)) return
+  participantNames.set(publicKeyId, guestNameForKey(publicKeyId)) // instant placeholder, also guards re-fetching
+  fetchAccountByPublicKey(publicKeyId).then((account) => {
+    if (account) participantNames.set(publicKeyId, account.username)
+  })
+}
+
 const seenMessageIds = new Set<string>()
 let messageChannel: RealtimeChannel | null = null
 
@@ -75,10 +101,11 @@ async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string
   try {
     const json = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
     const plain = JSON.parse(json) as DecodedMessage
+    resolveName(plain.sender)
     messages.value.push({
       id: row.id,
-      mine: plain.sender === ownPublicKeyId,
-      senderName: plain.senderName ?? 'Someone',
+      mine: myKeys.has(plain.sender),
+      sender: plain.sender,
       text: plain.text,
     })
     scrollToBottom()
@@ -102,6 +129,7 @@ onMounted(async () => {
       const privateKeyJwk = unpackJwk(props.packedKey)
       privateKey = await importPrivateKey(privateKeyJwk)
       ownPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
+      myKeys = new Set([ownPublicKeyId])
     } else {
       status.value = 'not-found'
       return
@@ -136,21 +164,17 @@ onMounted(async () => {
     sessionKey = await importSessionKey(access.sessionKey)
     ownRole = access.role
     if (props.sessionId) {
-      ownPublicKeyId = access.identityPublicKeyId ?? currentAccount.value!.publicKeyId
+      // Always send as the account's real key, even for a migrated session
+      // — that's what lets new messages resolve to the account's live
+      // username for everyone. The pinned identityPublicKeyId (if any) only
+      // extends "mine" to also cover messages sent before migration.
+      ownPublicKeyId = currentAccount.value!.publicKeyId
+      myKeys = new Set([ownPublicKeyId, access.identityPublicKeyId].filter((k): k is string => !!k))
     } else if (currentAccount.value) {
       // Viewing a guest link while already logged in — check whether this
       // session has already been migrated, so "Add to account" doesn't
       // offer to redo something that's done.
       migrated.value = await alreadyHasAccess(currentAccount.value, activeSessionId)
-    }
-
-    // Only a guest needs this: their own random name, assigned once at
-    // join time, is the fallback baked into messages they send. A logged-in
-    // account always uses its own live username instead — see send() below.
-    if (!currentAccount.value) {
-      const participants = await fetchParticipants(activeSessionId)
-      const myRow = participants.find((p) => p.public_key === ownPublicKeyId)
-      ownDisplayName = myRow?.display_name ?? 'Someone'
     }
 
     const existing = await fetchMessages(activeSessionId)
@@ -174,8 +198,7 @@ async function send() {
 
   sending.value = true
   try {
-    const senderName = currentAccount.value ? currentAccount.value.account.username : ownDisplayName
-    const payload: DecodedMessage = { sender: ownPublicKeyId, senderName, text, createdAt: new Date().toISOString() }
+    const payload: DecodedMessage = { sender: ownPublicKeyId, text, createdAt: new Date().toISOString() }
     const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(payload))
     const ok = await sendMessage(activeSessionId, ciphertext, iv)
     if (ok) {
@@ -412,7 +435,7 @@ function goHome() {
       <ul class="thread">
         <li v-if="!messages.length" class="empty">No messages yet — say hello.</li>
         <li v-for="m in messages" :key="m.id" :class="['bubble', m.mine ? 'mine' : 'theirs']">
-          <span v-if="!m.mine" class="sender">{{ m.senderName }}</span>
+          <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
           {{ m.text }}
         </li>
         <li ref="scrollAnchor" class="anchor"></li>

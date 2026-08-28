@@ -18,7 +18,6 @@ import {
   canonicalPublicKeyId,
 } from '../lib/crypto'
 import { createSession, insertSessionAccess, addParticipant, fetchSessionAccessForOwner, toEnvelope } from './sessions'
-import { randomGuestName } from '../lib/guestName'
 import type { SessionAccessPayload, JoinPayload } from '../lib/sessionTypes'
 import type { CurrentAccount } from '../lib/auth'
 
@@ -47,15 +46,13 @@ export async function alreadyHasAccess(account: CurrentAccount, sessionId: strin
 interface Identity {
   privateKey: CryptoKey
   publicKey: CryptoKey
-  displayName: string | null // null for an account holder — resolved live from `accounts` instead
 }
 
 async function resolveIdentity(account: CurrentAccount | null): Promise<Identity> {
   if (account) {
-    return { privateKey: account.privateKey, publicKey: account.publicKey, displayName: null }
+    return { privateKey: account.privateKey, publicKey: account.publicKey }
   }
-  const identity = await generateKeyPair()
-  return { privateKey: identity.privateKey, publicKey: identity.publicKey, displayName: randomGuestName() }
+  return generateKeyPair()
 }
 
 export interface StartedSession {
@@ -80,7 +77,7 @@ export async function startNewSession(account: CurrentAccount | null, title?: st
   if (!ok) return null
 
   const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
-  await addParticipant(sessionId, publicKeyId, identity.displayName)
+  await addParticipant(sessionId, publicKeyId)
 
   const packedKey = account ? null : packJwk(await exportPrivateKey(identity.privateKey))
   return { sessionId, packedKey }
@@ -108,7 +105,7 @@ export async function joinExistingSession(
   if (!ok) return null
 
   const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
-  await addParticipant(joinPayload.sessionId, publicKeyId, identity.displayName)
+  await addParticipant(joinPayload.sessionId, publicKeyId)
 
   const packedKey = account ? null : packJwk(await exportPrivateKey(identity.privateKey))
   return { sessionId: joinPayload.sessionId, packedKey }
@@ -116,14 +113,19 @@ export async function joinExistingSession(
 
 /**
  * Adds an account's own access to a session it currently only holds as a
- * guest (via a personal link) — without touching session_participants or
- * re-keying anything. The account's copy of session_access is sealed with
- * `identityPublicKeyId` pinned to the guest's original public key, so this
- * session keeps presenting as that one identity forever: old messages (sent
- * under the guest key, immutably) and any new ones sent after migration
- * both resolve against the exact same, untouched participant row. The
- * account's own real public key never needs to appear in this session at
- * all. Idempotent — migrating twice just confirms access already exists.
+ * guest (via a personal link) — without re-keying or touching the guest's
+ * original session_participants row. The account's copy of session_access
+ * still carries `identityPublicKeyId` pinned to the guest's original public
+ * key, but only so the account's *own* client can recognize old messages
+ * (sent under that key) as "mine" for bubble styling — see the comment on
+ * that field in lib/sessionTypes.ts. It plays no part in what anyone else
+ * sees. From here on the account sends as itself: a *new* session_participants
+ * row is added for the account's real public key, so future messages (sent
+ * under that real key, resolving live to the account's current username for
+ * everyone, not just the account itself) show up as a distinct, genuine
+ * participant — while the original guest identity's own messages stay
+ * exactly as they were. Idempotent — migrating twice just confirms access
+ * already exists, without adding a second participant row.
  */
 export async function migrateGuestSessionToAccount(
   sessionId: string,
@@ -142,5 +144,9 @@ export async function migrateGuestSessionToAccount(
   }
   const sealed = await sealForRecipient(payload, account.publicKey)
   const ownerPub = await deriveLookupTag(account.privateKey, 'session-access')
-  return insertSessionAccess(ownerPub, sealed)
+  const ok = await insertSessionAccess(ownerPub, sealed)
+  if (!ok) return false
+
+  await addParticipant(sessionId, account.publicKeyId)
+  return true
 }

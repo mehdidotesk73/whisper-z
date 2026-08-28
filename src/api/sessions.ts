@@ -146,25 +146,22 @@ export async function claimJoinAccess(joinId: string): Promise<JoinAccessRow | n
 
 // --- session_participants: the shared, plaintext "who's in this session" --
 // Fine to be plaintext: within a session everyone already knows who else is
-// in it. `display_name` is set for guests (a random name); left null for an
-// account holder, whose current username is looked up live instead.
+// in it. Just an enumeration of public keys — display names are never
+// stored here; they're resolved per-message from `sender` instead (see
+// docs/system-design.md §3), live against `accounts` with a deterministic
+// fallback (`guestNameForKey`) for a key that isn't one.
 
 export interface ParticipantRow {
   id: string
   session_id: string
   public_key: string
-  display_name: string | null
   created_at: string
 }
 
-export async function addParticipant(
-  sessionId: string,
-  publicKeyJson: string,
-  displayName: string | null,
-): Promise<boolean> {
+export async function addParticipant(sessionId: string, publicKeyJson: string): Promise<boolean> {
   const { error } = await supabase
     .from('session_participants')
-    .insert({ session_id: sessionId, public_key: publicKeyJson, display_name: displayName })
+    .insert({ session_id: sessionId, public_key: publicKeyJson })
 
   if (error) {
     logDebug(`addParticipant failed: ${error.message}`, 'error')

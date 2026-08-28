@@ -9,10 +9,14 @@ export interface SessionAccessPayload {
   /**
    * Present only when this access row is an account's migrated copy of a
    * guest session (see api/sessionActions.ts migrateGuestSessionToAccount).
-   * The account keeps presenting as this original guest public key for this
-   * one session, so old messages (sender = this id, baked in at encryption
-   * time and immutable) and new ones resolve to the same participant row
-   * with zero special-casing in the render path.
+   * Old messages were sent under this original guest key (baked in at
+   * encryption time, immutable) — this is a private hint, decryptable only
+   * by the account itself, letting its own client still recognize those old
+   * messages as "mine" for bubble styling. It plays no part in what anyone
+   * else sees: a message's sender NAME is resolved independently (see
+   * DecodedMessage below), purely from whichever public key actually sent
+   * it, live against the `accounts` table — an account's real key resolves
+   * to its real (and current) username, this pinned guest key never will.
    */
   identityPublicKeyId?: string
 }
@@ -24,17 +28,6 @@ export interface JoinPayload {
 
 export interface DecodedMessage {
   sender: string
-  /**
-   * The sender's own best-known name for themselves, baked in at send time
-   * by the sending client — not resolved later from session_participants.
-   * This is what lets a migrated guest identity's later messages show the
-   * account's current username to everyone else, while earlier messages
-   * (sent before any account existed) keep showing whatever name was true
-   * then: each message is a frozen, self-reported snapshot, the same way
-   * session_participants.display_name already is — no new trust
-   * assumption, no new table, no re-resolving after the fact.
-   */
-  senderName: string
   text: string
   createdAt: string
 }

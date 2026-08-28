@@ -48,6 +48,25 @@ export async function insertSessionAccess(ownerPub: string, envelope: SealedEnve
   return true
 }
 
+/**
+ * Rewrites an existing session_access row's sealed payload in place — used
+ * to merge a newly migrated guest identity into a row an account already
+ * has for a session, rather than inserting a second row for the same
+ * session (see migrateGuestSessionToAccount in api/sessionActions.ts).
+ */
+export async function updateSessionAccess(id: string, envelope: SealedEnvelope): Promise<boolean> {
+  const { error } = await supabase
+    .from('session_access')
+    .update({ ciphertext: envelope.ciphertext, iv: envelope.iv, ephemeral_public_key: envelope.ephemeralPublicKey })
+    .eq('id', id)
+
+  if (error) {
+    logDebug(`updateSessionAccess failed: ${error.message}`, 'error')
+    return false
+  }
+  return true
+}
+
 export async function fetchSessionAccessForOwner(ownerPub: string): Promise<SessionAccessRow[]> {
   const { data, error } = await supabase.from('session_access').select('*').eq('owner_pub', ownerPub)
 
@@ -144,27 +163,33 @@ export async function claimJoinAccess(joinId: string): Promise<JoinAccessRow | n
   return data as JoinAccessRow | null
 }
 
-// --- session_participants: the shared, plaintext "who's in this session" --
-// Fine to be plaintext: within a session everyone already knows who else is
-// in it. `display_name` is set for guests (a random name); left null for an
-// account holder, whose current username is looked up live instead.
+// --- session_participants: "who's in this session", encrypted with the --
+// session's own shared key. `session_id` stays a plaintext lookup column —
+// "this session has N participant rows" is the same accepted metadata leak
+// as `messages.session_id` already being plaintext — but each row's public
+// key is sealed inside `ciphertext`, symmetrically, with the exact same
+// session key `messages` are encrypted with (see encryptText/decryptText in
+// lib/crypto.ts — no ECDH, no ephemeral key needed: anyone who legitimately
+// holds the session key is already a real participant). Without that key, a
+// full database dump shows sessions exist and roughly how many people are
+// in each, but never which public keys — closing a real gap the previous,
+// plaintext `public_key` column left open: an account uses the same real
+// key every time it joins a session, so a plaintext column here would have
+// let anyone query "every session this public key has ever joined" directly,
+// exactly the membership graph `session_access`'s lookup-tag design exists
+// to hide. Display names are never stored here regardless; they're resolved
+// per-message from `sender` instead (see docs/system-design.md §3).
 
 export interface ParticipantRow {
   id: string
   session_id: string
-  public_key: string
-  display_name: string | null
+  ciphertext: string
+  iv: string
   created_at: string
 }
 
-export async function addParticipant(
-  sessionId: string,
-  publicKeyJson: string,
-  displayName: string | null,
-): Promise<boolean> {
-  const { error } = await supabase
-    .from('session_participants')
-    .insert({ session_id: sessionId, public_key: publicKeyJson, display_name: displayName })
+export async function addParticipant(sessionId: string, ciphertext: string, iv: string): Promise<boolean> {
+  const { error } = await supabase.from('session_participants').insert({ session_id: sessionId, ciphertext, iv })
 
   if (error) {
     logDebug(`addParticipant failed: ${error.message}`, 'error')

@@ -16,21 +16,47 @@ Key functions: `sealForRecipient`/`openSealed`/`deriveLookupTag`/`generateSessio
 See §3 in `docs/system-design.md` and "Rebuilding the Chat Model for a Hidden Membership Graph" in
 `docs/experience.md` for the full design and what was deliberately scoped out.
 
-**Stage B: accounts + hidden session index** (pending merge) — accounts reuse the exact guest
+**Stage B: accounts + hidden session index** (v0.5.0) — accounts reuse the exact guest
 mechanism (keypair + `deriveLookupTag('session-access')`) with one difference: the keypair is
 stable, so one query rebuilds a whole chat list (`src/api/sessionList.ts`). New
 `#/mysession/<sessionId>` route disambiguates which of an account's many sessions a chat-list tap
 means, since a bare personal link can no longer assume "the one session" once an account holds more
 than one. `accounts.public_key` is the one intentionally searchable identity value in the schema.
-See the "account is just another identity" + "why a personal link isn't enough" entries in
-`docs/system-design.md` §3.
+Also shipped in this stage's PR after live testing: single-use expiring invite links, an
+already-a-member guard, "Join as guest/existing user/`<username>`", and live username resolution
+for account holders in the thread. See the "account is just another identity" + "why a personal
+link isn't enough" entries in `docs/system-design.md` §3.
+
+**Stage C: guest → account migration** (pending) — `migrateGuestSessionToAccount`
+(`src/api/sessionActions.ts`) merges a guest identity's key into `identityPublicKeyIds`, an array on
+the account's own `session_access` row for that session — creating that row if the account doesn't
+have one yet, or updating it in place (via `updateSessionAccess`) if it already does, rather than
+always inserting a second row for the same session. The guest's original `session_participants` row
+is never touched; a new one is added for the account's real key only if it doesn't already have one.
+Future messages are sent under that real key. A message's displayed sender name is never stored
+anywhere — resolved live, purely from `sender`, against `accounts`, with a deterministic (no-lookup)
+fallback name derived from the key itself (`guestNameForKey`, `src/lib/guestName.ts`) for a key that
+isn't one. That's what makes a migrated identity's *later* messages correctly show the account's
+current username to everyone else while its *earlier* ones keep resolving to the same guest name they
+always did — nothing here treats "migrated" as a special case anywhere in the render path. Also fixed:
+(1) found through the user's own review of the table's design — `session_participants` used to store
+an account's real public key in plaintext, which — combined with `using (true)` RLS — let anyone with
+database access recover which sessions an account has ever joined directly, defeating
+`session_access`'s whole hidden-membership-graph design for every account (not guests); each row's
+identity is now symmetrically encrypted with the session's own shared key instead (same functions
+`messages` already uses), leaving only `session_id` as plaintext lookup metadata. (2) found through
+live device testing — an account that had already joined a session directly under its own key, then
+migrated in a *different* guest identity from the same session, never actually recognized that
+guest's old messages as its own, because the old single-key `identityPublicKeyId` field and its
+too-coarse idempotency check silently no-opped instead of merging; fixed by the array + merge-in-place
+design described above. See "An account can migrate a guest session it already holds", "A message's
+displayed sender name is resolved live", and "`session_participants` is keyed by plaintext
+`session_id`" in `docs/system-design.md` §3.
 
 ## Next (Current Sprint)
 
 Continuing the session-model rebuild, in order:
 
-- [ ] **Stage C** — guest → account migration via a personal link, with a private identity alias so
-      history renders correctly with no special-casing
 - [ ] **Stage D** — real multi-participant support: invite by public key into an existing session,
       an `accepted` flag with view-only enforcement (client-checked, not server-verified), a
       collapsible session list grouped by other participant

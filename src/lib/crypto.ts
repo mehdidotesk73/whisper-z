@@ -38,8 +38,9 @@ export function publicJwkFromPrivateJwk(jwk: JsonWebKey): JsonWebKey {
 
 /**
  * A stable identity string for a P-256 public key, for exact-match storage
- * and comparison (session_participants.public_key, a message's `sender`).
- * `x`/`y` are the only fields that actually identify the key — JSON.stringify
+ * and comparison (accounts.public_key, a message's `sender`, the encrypted
+ * value inside a session_participants row). `x`/`y` are the only fields that
+ * actually identify the key — JSON.stringify
  * on a whole JWK isn't safe for this, since two JWKs for the same key can
  * serialize with different field orders depending on how each was built
  * (the browser's own `exportKey` vs. `publicJwkFromPrivateJwk` above).

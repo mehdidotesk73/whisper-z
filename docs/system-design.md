@@ -117,9 +117,8 @@ join_access (                                                -- a redeemable inv
   id uuid pk, ciphertext text, iv text, created_at, consumed_at nullable
 )
 
-session_participants (                                       -- who's in a session (plaintext — see below)
-  id uuid pk, session_id fk → sessions, public_key text,
-  display_name text nullable, created_at
+session_participants (                       -- who's in a session — session_id plaintext, identity encrypted
+  id uuid pk, session_id fk → sessions, ciphertext text, iv text, created_at
 )
 
 messages (
@@ -152,11 +151,11 @@ recovers the same shared secret. Every encrypted table in this schema — `sessi
 here is a new algorithm, just ECDH + AES-GCM applied to a one-time keypair instead of a long-term
 identity.
 
-**Why `session_access.owner_pub` isn't a real public key.** A participant's actual public key is
-already public information (`session_participants.public_key`, or an account's directory entry in
-a later stage) — using it directly as the lookup column for "which sessions does this identity
-have" would let anyone who already knows that public key run exactly that query and reconstruct the
-membership graph. Instead, `owner_pub` is `deriveLookupTag(privateKey, 'session-access')`: a
+**Why `session_access.owner_pub` isn't a real public key.** An account's actual public key is
+already public information (`accounts.public_key`, intentionally searchable) — using it directly as
+the lookup column for "which sessions does this identity have" would let anyone who already knows
+that public key run exactly that query and reconstruct the membership graph. Instead, `owner_pub` is
+`deriveLookupTag(privateKey, 'session-access')`: a
 SHA-256 digest of the private key's scalar plus a purpose string. It's stable (the same identity
 always re-derives the same tag, so one query finds every session_access row it owns), but
 computable *only* by whoever holds the private key — the public key alone gives no way to compute
@@ -191,17 +190,31 @@ cron job is needed to close that window. Inviting a second person means generati
 can currently mint an invite link — restricting that to the owner is one of the still-open gaps
 tracked in `docs/TODO.md`, alongside real (server-verified) role enforcement.
 
-**`session_participants` is deliberately plaintext, and that's fine.** It holds who's in a
-*specific, already-known* session — every legitimate participant already sees this by definition of
-being in the conversation, so hiding it from them buys nothing. What must stay hidden is the
-different fact of *which sessions a given identity belongs to across the whole table*, which is
-exactly what the `session_access` lookup-tag design above protects. `display_name` is set for a
-guest (a random name, `randomGuestName()`) and left `null` for an account holder, whose current
-username is resolved live instead of frozen at join time — `SessionView.vue`'s `applyParticipant`
-calls `fetchAccountByPublicKey` for any row with a null `display_name`, and the participant-name map
-is a Vue `reactive()` Map (not a plain one) specifically so the thread re-renders once that lookup
-resolves, rather than a message's sender staying stuck on the "Someone" fallback it showed before
-the async lookup finished.
+**`session_participants` is keyed by plaintext `session_id`, but each row's identity is encrypted —
+this was a real vulnerability until it wasn't.** An earlier version of this table stored a
+participant's public key as a plaintext column. That looked harmless — every legitimate participant
+already sees who else is in a *specific, already-known* session by definition of being in the
+conversation — but it quietly reopened exactly the leak `session_access`'s lookup-tag design exists
+to close: an account uses the *same real public key* every time it joins or starts a session, so a
+plaintext `public_key` column, combined with RLS set to `using (true)`, let anyone with database
+access run `select session_id from session_participants where public_key = X` directly and
+reconstruct the complete list of sessions that account has ever touched — the membership graph,
+recovered through a side door. Guests were never exposed this way (a one-off keypair isn't linkable
+to anything else), but any account participating normally was.
+
+The fix reuses a pattern already in the schema rather than inventing one: each row's identity is now
+symmetrically encrypted with that *session's own shared key* — the exact same key and the exact same
+`encryptText`/`decryptText` functions `messages` already use. No ECDH, no `ephemeral_public_key`
+column needed here, because this isn't sealed to one specific recipient — anyone who legitimately
+holds the session key (i.e., is already a real participant, via their own `session_access` row) can
+decrypt every row for that session. `session_id` stays a plaintext lookup column — "this session has
+N participant rows" is the same class of accepted metadata leak as `messages.session_id` already
+being plaintext (existence and rough activity level, never identity) — but a raw database dump can no
+longer be searched by public key at all. Joining still costs one insert of your own new row,
+encrypted with a key you already have in hand at that point; nobody else's row is ever rewritten. See
+"a message's displayed sender name is resolved live" below for how both the thread and the chat-list
+"other participants" preview turn a decrypted public key into a name, identically, on demand — no
+name is ever stored here, encrypted or otherwise.
 
 **An account is just another identity — the same mechanism, a stable keypair.** Creating an account
 (`CreateAccount.vue`) generates a keypair exactly like a guest does, except the keypair is kept (a
@@ -247,14 +260,76 @@ under its tag, then opens each envelope until it finds the one whose decrypted `
 the route — the id in the URL is just a disambiguator, never a capability, since it's meaningless
 without the account's private key to actually open anything. This is also the flag that turns off
 the **Warning** control: an account-backed session is always recoverable via the account's own link,
-so there is nothing to warn about losing.
+so there is nothing to warn about losing — and the same reasoning turns it off for a migrated guest
+session too, checked at mount (for a `packedKey` route) via `isIdentityMerged` — specifically whether
+*this* guest identity has been merged into the current account, not just whether the account has
+some unrelated access to the session (see "An account can migrate a guest session" below for why
+that distinction matters).
 
-**Messages carry their sender inside the ciphertext, not a column.** A decrypted message is
-`{ sender: <public key JSON>, text, createdAt }` (`src/lib/sessionTypes.ts`). `SessionView` decrypts
-each row with the session key, matches `sender` against its own public key for "mine" styling, and
-looks up everyone else's current name via the in-memory `session_participants` map kept live by a
-realtime subscription — so a message's displayed sender name can update if that mapping changes
-later (relevant once guest→account migration lands), without rewriting the message itself.
+**An account can migrate a guest session it already holds — and starts sending as itself from that
+point on.** A message's `sender` field is baked into its ciphertext at send time, immutably, so
+"attach my guest session to my account" can never rewrite who sent old messages — only add a new way
+to reach the session and a new identity to send under going forward. `migrateGuestSessionToAccount`
+(`src/api/sessionActions.ts`) merges the guest's public key into `identityPublicKeyIds`, an array on
+the account's own `session_access` row for that session (sealed to the account's real key as always,
+so only the account can find it via its own lookup tag). Merges, not just pins a single key, because
+an account can end up needing to recognize *more than one* prior identity in the same session — most
+notably, an account that already joined this exact session directly under its own key (`ava` in the
+scenario below) before ever migrating a guest visit in. If the account has no row for this session
+yet, one is created with a single-entry array; if it already has one — from a direct join or an
+earlier migration of a *different* guest identity in the same session — that row is updated in place,
+adding the new key to the array, rather than inserting a second row for the same session. A second
+row was tried first and found to be a real bug (see `docs/experience.md`'s v0.6.0 entry): `SessionView`
+finds "the" row for a route's `sessionId` by taking the first match it opens, so a second row's pin
+silently never gets read — an account that had directly joined a session and then migrated a guest
+identity into it saw the guest's old messages rendered as a stranger's forever, never as its own. A
+`session_participants` row for the account's real key is added only if one doesn't already exist
+(skipped when the account already joined this session directly, so its own key never gets a duplicate
+row). Nobody else's client ever reads `identityPublicKeyIds` — a fellow participant has no basis to
+connect the merged identities, and isn't meant to. From migration onward, `SessionView.vue` sends new
+messages under the account's real key (`ownPublicKeyId`), which is what lets those messages resolve to
+the account's actual username for everyone — see "a message's displayed sender name is resolved live"
+below. The guest's original personal link, and its untouched `session_participants` row, keep working
+afterward too — migration only *adds*, never rewrites. Idempotent per guest identity: re-migrating the
+same guest key just confirms it's already in the array, without touching the row again.
+
+**A message's displayed sender name is resolved live, purely from `sender` — never baked in, never
+read from `session_participants`.** A decrypted message is `{ sender: <public key id>, text,
+createdAt }` (`src/lib/sessionTypes.ts`) — that's all it carries. `SessionView.vue`'s `nameFor`
+resolves a name for any key the same way, every time it's asked: look it up in `accounts`
+(`fetchAccountByPublicKey`); if that key isn't anyone's account, fall back to
+`guestNameForKey(publicKeyId)` (`src/lib/guestName.ts`) — a small non-cryptographic hash of the key
+itself picking a color+noun+suffix combination. Nothing is stored for the fallback case either: the
+same key always hashes to the same name, computed identically by every viewer, with no lookup and no
+write. Resolution is memoized per key in a `reactive()` map (`resolveName`) so the async accounts
+query only happens once per distinct sender seen, with the deterministic name shown instantly as a
+placeholder in the meantime — no "Someone" flash while it resolves.
+
+This is what makes a migrated identity behave correctly *without treating it specially anywhere*:
+`migrateGuestSessionToAccount` (see above) leaves the guest's old messages exactly as they were —
+sealed under the guest's original key, which was never anyone's `accounts` row, so they always
+resolve to that one deterministic guest name, forever. From migration onward `SessionView.vue` sends
+new messages under the account's real key (`ownPublicKeyId`), not any pinned one —
+`identityPublicKeyIds` is consulted for exactly one purpose, privately, on the account's own client:
+extending its local `myKeys` set so old messages under every merged identity *still* count as "mine"
+for bubble alignment. Nobody else's `nameFor` call ever looks at `identityPublicKeyIds` — a fellow
+participant has no way to connect the merged identities, and isn't meant to; only the account itself
+privately knows they're the same. A message sent by an account always resolves to that account's
+*current* username, including retroactively if it's renamed later (there's no rename feature yet,
+but nothing here would need to change if one shipped) — this is a deliberate choice of "always show
+the truth now" over "freeze what was true when it was sent," and it costs nothing extra: the accounts
+table was always the source of truth for what an account is called.
+
+`session_participants` still exists and still matters — not for names, but as the enumeration
+`sessionList.ts` needs to know who's "in" a session without decrypting every message in it. It has
+never stored a name — only an encrypted public key (see "`session_participants` is keyed by
+plaintext `session_id`" above) — so displayed names anywhere in the app — the thread, and a
+chat-list "other participants" preview — are always computed the same way, from a public key, on
+demand.
+
+A resolved name (an account's own username, unbounded in length) is truncated to 20 characters with
+a trailing `…` wherever the thread renders it (`truncateName`, `lib/guestName.ts`) — display-only,
+never affecting the stored value or the identity itself.
 
 **No "waiting for the other side" state anymore.** Because the session key isn't derived from a
 second person's public key, the creator has full read/write access to their own session the instant
@@ -314,7 +389,8 @@ src/components/
   CreateAccount.vue   generate an account keypair + username, reveal its one-time account link
   JoinSession.vue     redeem an invite link as the logged-in account, a guest, or by logging in
                       on the spot (pasting an account link) — all via sessionActions.ts
-  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId
+  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId,
+                      and a guest route can migrate to an account in place ("+ Add to account")
 ```
 
 ## §7 — Build, Deploy & Conventions

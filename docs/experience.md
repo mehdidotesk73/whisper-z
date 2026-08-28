@@ -121,6 +121,64 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.6.0 — 2026-08-28 (Stage C: guest → account migration)
+- **Added:** `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) — adds an account's own
+  `session_access` row to a session it currently only holds as a guest, plus a new
+  `session_participants` row for the account's real key; the guest's original row is never touched
+- **Fixed (found in live device testing, 3-tab scenario):** an account that had already joined a
+  session *directly* under its own key, then separately used "+ Add to account" to migrate in a
+  *different* guest identity that also participated in the same session, never actually recognized
+  that guest's old messages as its own. Root cause: `migrateGuestSessionToAccount`'s idempotency guard
+  (`alreadyHasAccess`) treated "the account already has *some* row for this session" as "this guest
+  identity is already migrated," and returned early without ever writing the pin — so the guest's key
+  was never added anywhere the account's client could learn about it. Fixed by replacing the single
+  `identityPublicKeyId` field with an `identityPublicKeyIds` array, merged into whatever access row
+  the account already has for that session (updated in place via a new `updateSessionAccess`) instead
+  of always inserting a fresh row and gating on a too-coarse existence check. Also added
+  `isIdentityMerged` (checks whether *this specific* guest key is in the array, for the "+ Add to
+  account"/Warning visibility check — narrower than `alreadyHasAccess`, which is still correct for its
+  original use, preventing an account from double-joining under its own key) and a `hasParticipant`
+  guard so migrating never inserts a duplicate `session_participants` row when the account already has
+  one from a direct join. Verified with a standalone script reproducing the exact reported scenario:
+  after migration the account still has exactly one `session_access` row (merged, not duplicated), its
+  `myKeys` set includes both its own key and the merged guest key, and participant rows stay at exactly
+  one-per-identity. See "An account can migrate a guest session it already holds" in
+  `docs/system-design.md` §3
+- **Fixed a real, already-shipped vulnerability, found through the user's own architecture review of
+  this table:** `session_participants.public_key` stored an account's real public key in plaintext.
+  Because an account reuses that same key across every session it joins, and RLS is `using (true)`,
+  anyone with database access could run `select session_id from session_participants where
+  public_key = X` and recover the exact membership graph `session_access`'s lookup-tag design exists
+  to hide — for every account, though not guests (one-off keys per session). Fixed by symmetrically
+  encrypting each row's identity with the session's own shared key, reusing `encryptText`/
+  `decryptText` (the exact functions `messages` already use) instead of ECDH sealing — no
+  `ephemeral_public_key` needed, since anyone holding the session key is already a legitimate
+  participant. `session_id` stays a plaintext lookup column (existence/count, not identity, same
+  accepted leak as `messages.session_id`). Verified with a standalone script: no plaintext identity
+  recoverable from a raw row dump, a legitimate session-key holder decrypts correctly, the wrong
+  session's key fails outright. See "`session_participants` is keyed by plaintext `session_id`" in
+  `docs/system-design.md` §3
+- **Added:** `+ Add to account` control on `SessionView.vue` (a guest-routed session only): one tap
+  if already logged in, or paste-an-account-link-and-log-in-then-migrate if not
+- **Redesigned (twice, after live testing) how a message's sender name is determined.** First pass
+  baked a `senderName` into each message at send time — fixed the reported "migrated identity's new
+  messages still show the old guest name" bug, but froze names as historical snapshots. Second pass,
+  prompted by a sharper design from live testing, replaced that with fully live resolution: a
+  message carries only `sender` (its public key); `SessionView.vue`'s `nameFor` resolves that key
+  against `accounts` every time, falling back to `guestNameForKey` — a deterministic, storage-free
+  name hashed from the key itself — when it isn't one. `session_participants` has never stored a
+  name; `sessionList.ts`'s chat-list preview uses the exact same resolution as the thread, closing a
+  gap the first pass had left open
+- **Added:** `guestNameForKey` (`src/lib/guestName.ts`) replaces `randomGuestName` — same word lists,
+  but deterministic (a hash of the public key, not `Math.random()`) so no name needs to be generated
+  or stored at join time at all, and a 3-character base36 suffix on top of color×noun to cut
+  collisions among many guest identities
+- **Added:** `truncateName` (`src/lib/guestName.ts`) — resolved names are capped at 20 characters
+  with a trailing `…` wherever the thread renders one, since an account's username is arbitrary length
+- See "An account can migrate a guest session it already holds" and "A message's displayed sender
+  name is resolved live" in `docs/system-design.md` §3 for the full design and why identity pinning
+  ended up scoped to "mine" detection only, never to what a message displays
+
 ### v0.5.0 — 2026-08-28 (Stage B: accounts + hidden session index)
 - **Added:** accounts (`src/api/accounts.ts`, `src/lib/auth.ts`) — a keypair + username identity
   that reuses the guest session-access mechanism verbatim, except the keypair is stable across

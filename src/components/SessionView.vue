@@ -19,18 +19,17 @@ import {
   fetchMessages,
   sendMessage,
   subscribeMessages,
-  fetchParticipants,
-  subscribeParticipants,
   createJoinAccess,
   unsubscribe,
   toEnvelope,
-  type ParticipantRow,
 } from '../api/sessions'
 import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
-import { navigate, homeHash, joinHash } from '../lib/route'
-import { currentAccount } from '../lib/auth'
+import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
+import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
+import { isIdentityMerged, migrateGuestSessionToAccount } from '../api/sessionActions'
+import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
@@ -51,36 +50,45 @@ interface RenderedMessage {
 const messages = ref<RenderedMessage[]>([])
 const draft = ref('')
 const sending = ref(false)
+const migrated = ref(false) // this guest session already has an account attached to it
 const scrollAnchor = ref<HTMLElement>()
 const composerTextarea = ref<HTMLTextAreaElement>()
 
 let activeSessionId = ''
 let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
+// The identity used to SEND: a guest's one-off key, or an account's real
+// key (always — even for a migrated session, see onMounted below).
 let ownPublicKeyId = ''
-// Reactive so the template re-renders once an account holder's username
-// resolves — see applyParticipant below.
-const participantNames = reactive(new Map<string, string>()) // public key id -> display name
+let ownRole: 'owner' | 'member' = 'member'
+// Which sender keys count as "mine" for bubble styling — usually just
+// ownPublicKeyId, but a migrated session's account also privately
+// recognizes its old, pinned guest key as its own (see identityPublicKeyId
+// in lib/sessionTypes.ts).
+let myKeys = new Set<string>()
+
+// Sender display names are resolved per-message from `sender` alone, live
+// against `accounts`, with a deterministic (no-lookup) fallback for a key
+// that isn't one — see lib/guestName.ts and docs/system-design.md §3. This
+// is why a migrated identity's old messages keep the guest's name while
+// its new ones correctly show the account's current username: nothing
+// here treats them specially, both are just "resolve this sender key."
+const participantNames = reactive(new Map<string, string>())
+
+function nameFor(publicKeyId: string): string {
+  return truncateName(participantNames.get(publicKeyId) ?? guestNameForKey(publicKeyId))
+}
+
+function resolveName(publicKeyId: string) {
+  if (participantNames.has(publicKeyId)) return
+  participantNames.set(publicKeyId, guestNameForKey(publicKeyId)) // instant placeholder, also guards re-fetching
+  fetchAccountByPublicKey(publicKeyId).then((account) => {
+    if (account) participantNames.set(publicKeyId, account.username)
+  })
+}
+
 const seenMessageIds = new Set<string>()
 let messageChannel: RealtimeChannel | null = null
-let participantChannel: RealtimeChannel | null = null
-
-function nameFor(publicKeyJson: string): string {
-  return participantNames.get(publicKeyJson) ?? 'Someone'
-}
-
-// A guest's display_name is set at join time and used as-is. An account
-// holder's is deliberately left null (system-design.md §3) so their current
-// username is resolved live instead of frozen at join time — that lookup
-// happens here.
-async function applyParticipant(row: ParticipantRow) {
-  if (row.display_name) {
-    participantNames.set(row.public_key, row.display_name)
-    return
-  }
-  const account = await fetchAccountByPublicKey(row.public_key)
-  participantNames.set(row.public_key, account?.username ?? 'Someone')
-}
 
 async function scrollToBottom() {
   await nextTick()
@@ -93,9 +101,10 @@ async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string
   try {
     const json = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
     const plain = JSON.parse(json) as DecodedMessage
+    resolveName(plain.sender)
     messages.value.push({
       id: row.id,
-      mine: plain.sender === ownPublicKeyId,
+      mine: myKeys.has(plain.sender),
       sender: plain.sender,
       text: plain.text,
     })
@@ -114,11 +123,13 @@ onMounted(async () => {
         return
       }
       privateKey = currentAccount.value.privateKey
-      ownPublicKeyId = currentAccount.value.publicKeyId
+      // ownPublicKeyId is set below once `access` is decrypted — a migrated
+      // guest session pins it to the original guest key, not the account's.
     } else if (props.packedKey) {
       const privateKeyJwk = unpackJwk(props.packedKey)
       privateKey = await importPrivateKey(privateKeyJwk)
       ownPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
+      myKeys = new Set([ownPublicKeyId])
     } else {
       status.value = 'not-found'
       return
@@ -151,10 +162,22 @@ onMounted(async () => {
     activeSessionId = access.sessionId
     sessionKeyJwk = access.sessionKey
     sessionKey = await importSessionKey(access.sessionKey)
-
-    const participants = await fetchParticipants(activeSessionId)
-    await Promise.all(participants.map(applyParticipant))
-    participantChannel = subscribeParticipants(activeSessionId, applyParticipant)
+    ownRole = access.role
+    if (props.sessionId) {
+      // Always send as the account's real key, even for a migrated session
+      // — that's what lets new messages resolve to the account's live
+      // username for everyone. The pinned identityPublicKeyId (if any) only
+      // extends "mine" to also cover messages sent before migration.
+      ownPublicKeyId = currentAccount.value!.publicKeyId
+      myKeys = new Set([ownPublicKeyId, ...(access.identityPublicKeyIds ?? [])])
+    } else if (currentAccount.value) {
+      // Viewing a guest link while already logged in — check whether *this*
+      // guest identity specifically has already been merged in, so "Add to
+      // account" doesn't offer to redo something that's done. Narrower than
+      // "does the account have any access to this session at all": it might,
+      // from an unrelated direct join, without this guest visit being linked.
+      migrated.value = await isIdentityMerged(currentAccount.value, activeSessionId, ownPublicKeyId)
+    }
 
     const existing = await fetchMessages(activeSessionId)
     for (const row of existing) await decodeAndAppend(row)
@@ -169,7 +192,6 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (messageChannel) unsubscribe(messageChannel)
-  if (participantChannel) unsubscribe(participantChannel)
 })
 
 async function send() {
@@ -228,6 +250,7 @@ async function generateInvite() {
 
 async function toggleInvite() {
   showWarning.value = false
+  showMigrate.value = false
   showInvite.value = !showInvite.value
   if (showInvite.value && !inviteLink.value) await generateInvite()
 }
@@ -239,14 +262,16 @@ async function copyInvite() {
   }
 }
 
-// Warning only applies to a guest (packedKey) route — an account-backed
-// (sessionId) route is recoverable via the account's own link instead.
+// Warning only applies to a guest (packedKey) route that hasn't been
+// migrated to an account — an account-backed (sessionId) route, or a
+// migrated guest route, is recoverable via the account's own link instead.
 const showWarning = ref(false)
 const personalLink = props.packedKey ? `${location.origin}${location.pathname}#/session/${props.packedKey}` : ''
 const copiedPersonal = ref(false)
 
 function toggleWarning() {
   showInvite.value = false
+  showMigrate.value = false
   showWarning.value = !showWarning.value
 }
 
@@ -257,10 +282,75 @@ async function copyPersonal() {
   }
 }
 
+// "Add to account" only applies to a guest (packedKey) route, and only
+// before it's been migrated once (checked in onMounted for anyone already
+// logged in; migrating always safely no-ops a second time regardless).
+const showMigrate = ref(false)
+const migrating = ref(false)
+const migrateError = ref('')
+const migrateAccountLinkInput = ref('')
+
+function toggleMigrate() {
+  showInvite.value = false
+  showWarning.value = false
+  showMigrate.value = !showMigrate.value
+  migrateError.value = ''
+}
+
+async function migrateToAccount() {
+  if (!currentAccount.value || !sessionKeyJwk) return
+  migrating.value = true
+  migrateError.value = ''
+  try {
+    const ok = await migrateGuestSessionToAccount(
+      activeSessionId,
+      sessionKeyJwk,
+      ownRole,
+      ownPublicKeyId,
+      currentAccount.value,
+    )
+    if (!ok) {
+      migrateError.value = 'Could not add this session to your account — try again.'
+      return
+    }
+    migrated.value = true
+    showMigrate.value = false
+    // Navigate to the account-backed view as the confirmation that this
+    // worked — otherwise nothing visibly changes and it looks like the
+    // click did nothing but log someone in.
+    navigate(mySessionHash(activeSessionId))
+  } catch (err) {
+    logDebug(`migrateToAccount failed: ${err}`, 'error')
+    migrateError.value = 'Could not add this session to your account — try again.'
+  } finally {
+    migrating.value = false
+  }
+}
+
+async function loginThenMigrate() {
+  migrateError.value = ''
+  const pasted = migrateAccountLinkInput.value.trim()
+  if (!pasted) return
+
+  const parsed = parseHash(extractHash(pasted))
+  if (parsed.name !== 'account') {
+    migrateError.value = "That doesn't look like an account link — check you copied the whole thing."
+    return
+  }
+
+  const ok = await loginWithPackedKey(parsed.packedKey)
+  if (!ok) {
+    migrateError.value = "That account link didn't work — check you copied the whole thing."
+    return
+  }
+  await migrateToAccount()
+}
+
 function onDocClick(e: MouseEvent) {
   if (panelArea.value && !panelArea.value.contains(e.target as Node)) {
     showInvite.value = false
     showWarning.value = false
+    showMigrate.value = false
   }
 }
 onMounted(() => document.addEventListener('click', onDocClick))
@@ -276,7 +366,10 @@ function goHome() {
     <div class="top-bar">
       <button class="chip" @click="goHome">← Home</button>
       <button v-if="status === 'ready'" class="chip" @click.stop="toggleInvite">Invite</button>
-      <button v-if="status === 'ready' && props.packedKey" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
+      <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip" @click.stop="toggleMigrate">
+        + Add to account
+      </button>
+      <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
     </div>
 
     <div ref="panelArea">
@@ -307,6 +400,31 @@ function goHome() {
           <input readonly :value="personalLink" @focus="($event.target as HTMLInputElement).select()" />
           <button @click="copyPersonal">{{ copiedPersonal ? 'Copied ✓' : 'Copy' }}</button>
         </div>
+      </div>
+
+      <div v-if="showMigrate" class="link-block">
+        <template v-if="currentAccount">
+          <p class="hint">
+            Adds this session to <strong>{{ currentAccount.account.username }}</strong
+            >'s chat list. Nothing about this thread changes — this is just another way to reach it.
+          </p>
+          <button class="primary" :disabled="migrating" @click="migrateToAccount">
+            {{ migrating ? 'Adding…' : `Add to ${currentAccount.account.username}'s account` }}
+          </button>
+        </template>
+        <template v-else>
+          <label>Add to an account</label>
+          <p class="hint">Paste your account link to sign in and add this session to its chat list.</p>
+          <input
+            v-model="migrateAccountLinkInput"
+            placeholder="Paste your account link"
+            @keydown.enter="loginThenMigrate"
+          />
+          <button class="primary" :disabled="migrating || !migrateAccountLinkInput.trim()" @click="loginThenMigrate">
+            {{ migrating ? 'Adding…' : 'Log in & add' }}
+          </button>
+        </template>
+        <p v-if="migrateError" class="error">{{ migrateError }}</p>
       </div>
     </div>
 
@@ -449,6 +567,38 @@ function goHome() {
 .new-link:disabled {
   opacity: 0.6;
   text-decoration: none;
+}
+
+.link-block input {
+  padding: 0.6rem;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.link-block .primary {
+  align-self: flex-start;
+  padding: 0.6rem 1rem;
+  min-height: 44px;
+  background: var(--accent-blue);
+  color: #fff;
+  border: none;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.link-block .primary:disabled {
+  opacity: 0.6;
+}
+
+.link-block .error {
+  color: var(--danger);
+  margin: 0;
+  font-size: 0.85rem;
 }
 
 .thread {

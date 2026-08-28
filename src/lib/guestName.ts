@@ -1,10 +1,13 @@
-// A random display name for a participant with no account — shown to other
-// participants instead of a raw public key. Purely cosmetic: the real
-// identity is the public key, this is just what humans see.
+// A guest's display name — shown to other participants instead of a raw
+// public key. Deterministic: derived purely from the public key itself, so
+// every viewer computes the exact same name for the same key with no
+// lookup and no storage — the "no account found for this sender" fallback
+// used by SessionView.vue's nameFor(). Purely cosmetic either way: the real
+// identity is always the public key.
 const COLORS = [
   'Red', 'Ruby', 'Copper', 'Pink', 'Magenta', 'Amber', 'Orange', 'Yellow',
   'Gold', 'Green', 'Emerald', 'Lime', 'Sage', 'Blue', 'Cobalt', 'Cyan',
-  'Teal', 'Purple', 'Indigo', 'Charcoal', 'Brown', 'Tan', 'Beige', 'White',
+  'Teal', 'Purple', 'Indigo', 'Charcoal', 'Brown', 'Beige', 'White',
   'Black', 'Gray', 'Silver', 'Maroon', 'Turquoise', 'Azure', 'Bronze',
 ]
 
@@ -33,8 +36,32 @@ const NOUNS = [
   'Poinsettia', 'Thistle', 'Geranium', 'Pansy', 'MorningGlory',
 ]
 
-export function randomGuestName(): string {
-  const color = COLORS[Math.floor(Math.random() * COLORS.length)]
-  const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)]
-  return `${color}${noun}`
+/** A small, fast, non-cryptographic string hash (djb2) — plenty for picking a cosmetic name. */
+function hashString(s: string): number {
+  let h = 5381
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 33) ^ s.charCodeAt(i)
+  }
+  return h >>> 0
+}
+
+/**
+ * Color+noun alone (31 × 149 ≈ 4.6k combinations) collides too often once
+ * there are many guest identities around, so a 3-character base36 suffix
+ * (36³ ≈ 46.7k) is appended — still derived purely from the key, so it's
+ * exactly as deterministic and storage-free as the rest of the name.
+ */
+export function guestNameForKey(publicKeyId: string): string {
+  const hash = hashString(publicKeyId)
+  const color = COLORS[hash % COLORS.length]
+  const noun = NOUNS[Math.floor(hash / COLORS.length) % NOUNS.length]
+  const suffix = (hash % 46656).toString(36).toUpperCase().padStart(3, '0')
+  return `${color}${noun}${suffix}`
+}
+
+const MAX_DISPLAYED_NAME_LENGTH = 20
+
+/** Usernames are arbitrary-length; truncate wherever one is shown inline next to a message or list row. */
+export function truncateName(name: string): string {
+  return name.length > MAX_DISPLAYED_NAME_LENGTH ? `${name.slice(0, MAX_DISPLAYED_NAME_LENGTH)}…` : name
 }

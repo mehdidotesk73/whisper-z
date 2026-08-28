@@ -36,6 +36,18 @@ export function publicJwkFromPrivateJwk(jwk: JsonWebKey): JsonWebKey {
   return { kty, crv, x, y, ext: true, key_ops: [] }
 }
 
+/**
+ * A stable identity string for a P-256 public key, for exact-match storage
+ * and comparison (session_participants.public_key, a message's `sender`).
+ * `x`/`y` are the only fields that actually identify the key — JSON.stringify
+ * on a whole JWK isn't safe for this, since two JWKs for the same key can
+ * serialize with different field orders depending on how each was built
+ * (the browser's own `exportKey` vs. `publicJwkFromPrivateJwk` above).
+ */
+export function canonicalPublicKeyId(jwk: JsonWebKey): string {
+  return `${jwk.x}.${jwk.y}`
+}
+
 export async function deriveSharedKey(privateKey: CryptoKey, publicKey: CryptoKey): Promise<CryptoKey> {
   return crypto.subtle.deriveKey({ name: 'ECDH', public: publicKey }, privateKey, AES_PARAMS, false, [
     'encrypt',

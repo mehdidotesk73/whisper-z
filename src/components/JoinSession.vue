@@ -10,6 +10,7 @@ import {
   deriveLookupTag,
   packJwk,
   urlSafeToBytes,
+  canonicalPublicKeyId,
 } from '../lib/crypto'
 import { fetchJoinAccess, insertSessionAccess, addParticipant } from '../api/sessions'
 import { randomGuestName } from '../lib/guestName'
@@ -63,8 +64,8 @@ async function join() {
       return
     }
 
-    const publicKeyJson = JSON.stringify(await exportPublicKey(identity.publicKey))
-    await addParticipant(joinPayload.sessionId, publicKeyJson, randomGuestName())
+    const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
+    await addParticipant(joinPayload.sessionId, publicKeyId, randomGuestName())
 
     const packedKey = packJwk(await exportPrivateKey(identity.privateKey))
     navigate(sessionHash(packedKey))

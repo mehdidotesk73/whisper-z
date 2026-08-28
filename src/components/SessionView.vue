@@ -2,8 +2,8 @@
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   importPrivateKey,
-  importPublicKey,
   publicJwkFromPrivateJwk,
+  canonicalPublicKeyId,
   deriveLookupTag,
   openSealed,
   importSessionKey,
@@ -53,7 +53,7 @@ const composerTextarea = ref<HTMLTextAreaElement>()
 let sessionId = ''
 let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
-let ownPublicKeyJson = ''
+let ownPublicKeyId = ''
 const participantNames = new Map<string, string>() // public key JSON -> display name
 const seenMessageIds = new Set<string>()
 let messageChannel: RealtimeChannel | null = null
@@ -80,8 +80,8 @@ async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string
     const plain = JSON.parse(json) as DecodedMessage
     messages.value.push({
       id: row.id,
-      mine: plain.sender === ownPublicKeyJson,
-      senderName: plain.sender === ownPublicKeyJson ? 'You' : nameFor(plain.sender),
+      mine: plain.sender === ownPublicKeyId,
+      senderName: plain.sender === ownPublicKeyId ? 'You' : nameFor(plain.sender),
       text: plain.text,
     })
     scrollToBottom()
@@ -95,7 +95,7 @@ onMounted(async () => {
     const privateKeyJwk = unpackJwk(props.packedKey)
     const privateKey = await importPrivateKey(privateKeyJwk)
     const publicKeyJwk = publicJwkFromPrivateJwk(privateKeyJwk)
-    ownPublicKeyJson = JSON.stringify(publicKeyJwk)
+    ownPublicKeyId = canonicalPublicKeyId(publicKeyJwk)
 
     const ownerPub = await deriveLookupTag(privateKey, 'session-access')
     const rows = await fetchSessionAccessForOwner(ownerPub)
@@ -135,7 +135,7 @@ async function send() {
 
   sending.value = true
   try {
-    const payload: DecodedMessage = { sender: ownPublicKeyJson, text, createdAt: new Date().toISOString() }
+    const payload: DecodedMessage = { sender: ownPublicKeyId, text, createdAt: new Date().toISOString() }
     const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(payload))
     const ok = await sendMessage(sessionId, ciphertext, iv)
     if (ok) {
@@ -163,12 +163,15 @@ function resizeComposer() {
   el.style.height = `${el.scrollHeight}px`
 }
 
-// Invite: lazily generate one join link per view-session, revealed on tap.
+// Invite and Warning panels: opening one closes the other, and clicking
+// anywhere outside this whole area closes whichever is open.
+const panelArea = ref<HTMLElement>()
 const showInvite = ref(false)
 const inviteLink = ref('')
 const copiedInvite = ref(false)
 
 async function toggleInvite() {
+  showWarning.value = false
   showInvite.value = !showInvite.value
   if (showInvite.value && !inviteLink.value && sessionKeyJwk) {
     const secretBytes = generateJoinSecret()
@@ -193,12 +196,26 @@ const showWarning = ref(false)
 const personalLink = `${location.origin}${location.pathname}#/session/${props.packedKey}`
 const copiedPersonal = ref(false)
 
+function toggleWarning() {
+  showInvite.value = false
+  showWarning.value = !showWarning.value
+}
+
 async function copyPersonal() {
   if (await copyToClipboard(personalLink)) {
     copiedPersonal.value = true
     setTimeout(() => (copiedPersonal.value = false), 1500)
   }
 }
+
+function onDocClick(e: MouseEvent) {
+  if (panelArea.value && !panelArea.value.contains(e.target as Node)) {
+    showInvite.value = false
+    showWarning.value = false
+  }
+}
+onMounted(() => document.addEventListener('click', onDocClick))
+onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 
 function goHome() {
   navigate(homeHash)
@@ -209,32 +226,34 @@ function goHome() {
   <div class="session">
     <div class="top-bar">
       <button class="chip" @click="goHome">← Home</button>
-      <button v-if="status === 'ready'" class="chip" @click="toggleInvite">Invite</button>
-      <button v-if="status === 'ready'" class="chip warning" @click="showWarning = !showWarning">⚠ Warning</button>
+      <button v-if="status === 'ready'" class="chip" @click.stop="toggleInvite">Invite</button>
+      <button v-if="status === 'ready'" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
     </div>
 
-    <div v-if="showInvite" class="link-block">
-      <label>Invite link</label>
-      <p class="hint">Send this to someone so they can join.</p>
-      <div class="link-row">
-        <input
-          readonly
-          :value="inviteLink || 'Generating…'"
-          @focus="($event.target as HTMLInputElement).select()"
-        />
-        <button :disabled="!inviteLink" @click="copyInvite">{{ copiedInvite ? 'Copied ✓' : 'Copy' }}</button>
+    <div ref="panelArea">
+      <div v-if="showInvite" class="link-block">
+        <label>Invite link</label>
+        <p class="hint">Send this to someone so they can join.</p>
+        <div class="link-row">
+          <input
+            readonly
+            :value="inviteLink || 'Generating…'"
+            @focus="($event.target as HTMLInputElement).select()"
+          />
+          <button :disabled="!inviteLink" @click="copyInvite">{{ copiedInvite ? 'Copied ✓' : 'Copy' }}</button>
+        </div>
       </div>
-    </div>
 
-    <div v-if="showWarning" class="link-block warning-block">
-      <p class="hint">
-        This session is only accessible using your personal link below. If you close this tab
-        without saving it, you'll lose access permanently — there's no password recovery.
-      </p>
-      <label>Your personal link</label>
-      <div class="link-row">
-        <input readonly :value="personalLink" @focus="($event.target as HTMLInputElement).select()" />
-        <button @click="copyPersonal">{{ copiedPersonal ? 'Copied ✓' : 'Copy' }}</button>
+      <div v-if="showWarning" class="link-block warning-block">
+        <p class="hint">
+          This session is only accessible using your personal link below. If you close this tab
+          without saving it, you'll lose access permanently — there's no password recovery.
+        </p>
+        <label>Your personal link</label>
+        <div class="link-row">
+          <input readonly :value="personalLink" @focus="($event.target as HTMLInputElement).select()" />
+          <button @click="copyPersonal">{{ copiedPersonal ? 'Copied ✓' : 'Copy' }}</button>
+        </div>
       </div>
     </div>
 

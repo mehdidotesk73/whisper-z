@@ -9,6 +9,7 @@ import {
   sealForRecipient,
   deriveLookupTag,
   packJwk,
+  canonicalPublicKeyId,
 } from '../lib/crypto'
 import { createSession, insertSessionAccess, addParticipant } from '../api/sessions'
 import { randomGuestName } from '../lib/guestName'
@@ -45,8 +46,8 @@ async function startSession() {
       return
     }
 
-    const publicKeyJson = JSON.stringify(await exportPublicKey(identity.publicKey))
-    await addParticipant(sessionId, publicKeyJson, randomGuestName())
+    const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
+    await addParticipant(sessionId, publicKeyId, randomGuestName())
 
     const packedKey = packJwk(await exportPrivateKey(identity.privateKey))
     navigate(sessionHash(packedKey))

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { importJoinKey, decryptText, urlSafeToBytes } from '../lib/crypto'
-import { fetchJoinAccess, deleteJoinAccess } from '../api/sessions'
+import { fetchJoinAccess, claimJoinAccess, isJoinAccessExpired } from '../api/sessions'
 import { joinExistingSession } from '../api/sessionActions'
 import { currentAccount } from '../lib/auth'
 import { sessionHash, mySessionHash, navigate } from '../lib/route'
@@ -12,8 +12,7 @@ const props = defineProps<{ joinId: string; secret: string }>()
 
 type Status = 'loading' | 'ready' | 'invalid' | 'joining' | 'failed'
 const status = ref<Status>('loading')
-
-let joinPayload: JoinPayload | null = null
+const invalidReason = ref("This invite link doesn't work — check you copied the whole thing.")
 
 onMounted(async () => {
   try {
@@ -22,10 +21,17 @@ onMounted(async () => {
       status.value = 'invalid'
       return
     }
+    if (isJoinAccessExpired(row)) {
+      invalidReason.value = 'This invite link has expired — ask for a new one.'
+      status.value = 'invalid'
+      return
+    }
 
+    // Decrypted only to confirm the secret actually matches this row (a
+    // mistyped link fails here); the real, single-use redemption happens in
+    // join() below via an atomic claim, not this read-only lookup.
     const joinKey = await importJoinKey(urlSafeToBytes(props.secret))
-    const json = await decryptText(joinKey, { ciphertext: row.ciphertext, iv: row.iv })
-    joinPayload = JSON.parse(json) as JoinPayload
+    await decryptText(joinKey, { ciphertext: row.ciphertext, iv: row.iv })
     status.value = 'ready'
   } catch (err) {
     logDebug(`Could not open invite link: ${err}`, 'warn')
@@ -34,18 +40,29 @@ onMounted(async () => {
 })
 
 async function join() {
-  if (!joinPayload) return
   status.value = 'joining'
 
   try {
+    // Atomic: of any number of people clicking "Join" on this same link at
+    // once, exactly one gets a non-null row back — see claimJoinAccess.
+    const claimed = await claimJoinAccess(props.joinId)
+    if (!claimed || isJoinAccessExpired(claimed)) {
+      invalidReason.value = claimed
+        ? 'This invite link has expired — ask for a new one.'
+        : 'This invite link has already been used.'
+      status.value = 'invalid'
+      return
+    }
+
+    const joinKey = await importJoinKey(urlSafeToBytes(props.secret))
+    const json = await decryptText(joinKey, { ciphertext: claimed.ciphertext, iv: claimed.iv })
+    const joinPayload = JSON.parse(json) as JoinPayload
+
     const started = await joinExistingSession(joinPayload, currentAccount.value)
     if (!started) {
       status.value = 'failed'
       return
     }
-    // Best-effort: the join already succeeded, so a failure here just leaves
-    // the link redeemable again rather than blocking navigation.
-    await deleteJoinAccess(props.joinId)
     navigate(started.packedKey ? sessionHash(started.packedKey) : mySessionHash(started.sessionId))
   } catch (err) {
     logDebug(`join failed: ${err}`, 'error')
@@ -58,9 +75,7 @@ async function join() {
   <div class="join">
     <p v-if="status === 'loading'" class="status">Loading…</p>
 
-    <p v-else-if="status === 'invalid'" class="status error">
-      This invite link doesn't work — check you copied the whole thing.
-    </p>
+    <p v-else-if="status === 'invalid'" class="status error">{{ invalidReason }}</p>
 
     <template v-else>
       <p class="intro">

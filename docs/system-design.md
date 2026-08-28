@@ -169,18 +169,23 @@ derives the public key, the lookup tag, queries `session_access` for that tag, a
 whichever row comes back to learn the session id and the shared key. No session id, no role, no
 separate identifier needed in the URL at all.
 
-**Join links are a symmetric bearer secret, not tied to any identity — and single-use.** Tapping
-Invite generates 32 random bytes (`generateJoinSecret`) used directly as a raw AES-256 key — no key
-agreement, since there's no recipient identity yet to agree with. The `join_access` row's ciphertext
-(session id + session key) is encrypted with those bytes; the link (`#/join/<joinId>/<secret>`)
-carries a plain lookup id (safe — it's not secret on its own) and the secret in the fragment.
-`JoinSession.vue` deletes the `join_access` row (`deleteJoinAccess`) right after a successful join,
-so the same link can't be redeemed twice — inviting a second person means generating a second link
-(the Invite panel's "New link, for another person"). This is a best-effort guarantee, not an atomic
-one: two people completing the join flow from the same link at the same instant can both still
-succeed, since neither re-checks the row before finishing. Any participant, not just the session's
-owner, can currently mint an invite link — restricting that to the owner is one of the still-open
-gaps tracked in `docs/TODO.md`, alongside real (server-verified) role enforcement.
+**Join links are a symmetric bearer secret, not tied to any identity — single-use and short-lived.**
+Tapping Invite generates 32 random bytes (`generateJoinSecret`) used directly as a raw AES-256 key —
+no key agreement, since there's no recipient identity yet to agree with. The `join_access` row's
+ciphertext (session id + session key) is encrypted with those bytes; the link
+(`#/join/<joinId>/<secret>`) carries a plain lookup id (safe — it's not secret on its own) and the
+secret in the fragment. Redeeming it (`claimJoinAccess`) is a single `DELETE ... RETURNING`
+statement, not a read followed by a separate delete — Postgres only lets one of any number of
+concurrent callers actually delete a given row, so if two people click "Join" on the same link at
+once, exactly one gets the row back and the other gets `null`. That's what makes this genuinely
+single-use rather than best-effort. It also expires: `isJoinAccessExpired` compares `created_at`
+against a 10-minute TTL (`JOIN_LINK_TTL_MS`), checked both when the link is first opened (so a stale
+link shows as invalid immediately) and again at the atomic claim (so a link that goes stale between
+opening and clicking "Join" still can't be redeemed) — no cron job needed, since an expired row is
+simply deleted the next time anyone tries to claim it. Inviting a second person means generating a
+second link (the Invite panel's "New link, for another person"). Any participant, not just the
+session's owner, can currently mint an invite link — restricting that to the owner is one of the
+still-open gaps tracked in `docs/TODO.md`, alongside real (server-verified) role enforcement.
 
 **`session_participants` is deliberately plaintext, and that's fine.** It holds who's in a
 *specific, already-known* session — every legitimate participant already sees this by definition of

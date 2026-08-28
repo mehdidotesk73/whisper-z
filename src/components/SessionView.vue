@@ -270,7 +270,10 @@ function goHome() {
     <div ref="panelArea">
       <div v-if="showInvite" class="link-block">
         <label>Invite link</label>
-        <p class="hint">Send this to someone so they can join. It works once — generate a new one for the next person.</p>
+        <p class="hint">
+          Send this to someone so they can join. It works once and expires in 10 minutes — generate
+          a new one for the next person.
+        </p>
         <div class="link-row">
           <input
             readonly

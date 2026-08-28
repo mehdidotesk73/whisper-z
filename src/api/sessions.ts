@@ -73,12 +73,20 @@ export function subscribeSessionAccess(
     .subscribe()
 }
 
-// --- join_access: a bearer link anyone holding its secret can redeem -------
+// --- join_access: a bearer link anyone holding its secret can redeem once --
+// exactly once, and only within a short window — see claimJoinAccess below.
 
 export interface JoinAccessRow {
   id: string
   ciphertext: string
   iv: string
+  created_at: string
+}
+
+export const JOIN_LINK_TTL_MS = 10 * 60 * 1000
+
+export function isJoinAccessExpired(row: Pick<JoinAccessRow, 'created_at'>): boolean {
+  return Date.now() - new Date(row.created_at).getTime() > JOIN_LINK_TTL_MS
 }
 
 export async function createJoinAccess(envelope: { ciphertext: string; iv: string }): Promise<string | null> {
@@ -95,6 +103,7 @@ export async function createJoinAccess(envelope: { ciphertext: string; iv: strin
   return data.id as string
 }
 
+/** Read-only lookup — used to validate a link (exists, not expired, secret matches) before showing "Join". */
 export async function fetchJoinAccess(joinId: string): Promise<JoinAccessRow | null> {
   const { data, error } = await supabase.from('join_access').select('*').eq('id', joinId).single()
 
@@ -105,15 +114,21 @@ export async function fetchJoinAccess(joinId: string): Promise<JoinAccessRow | n
   return data as JoinAccessRow
 }
 
-/** Consumes a join link after a successful redemption, so it can't be used again. */
-export async function deleteJoinAccess(joinId: string): Promise<boolean> {
-  const { error } = await supabase.from('join_access').delete().eq('id', joinId)
+/**
+ * Atomically consumes a join link: a `DELETE ... RETURNING` is a single
+ * statement, so if two people click "Join" on the same link at once,
+ * Postgres lets exactly one of them actually delete the row (and get it
+ * back) — the other's delete affects zero rows and gets null. That's what
+ * makes this single-use for real, not just "delete after the fact."
+ */
+export async function claimJoinAccess(joinId: string): Promise<JoinAccessRow | null> {
+  const { data, error } = await supabase.from('join_access').delete().eq('id', joinId).select('*').maybeSingle()
 
   if (error) {
-    logDebug(`deleteJoinAccess failed: ${error.message}`, 'error')
-    return false
+    logDebug(`claimJoinAccess failed: ${error.message}`, 'error')
+    return null
   }
-  return true
+  return data as JoinAccessRow | null
 }
 
 // --- session_participants: the shared, plaintext "who's in this session" --

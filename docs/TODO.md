@@ -55,10 +55,11 @@ One-time setup — tick these off as they're done:
   capability verifier, plus the fine-grained `K_INVITE_MEMBER`/`K_GRANT_ADMIN`-style permission
   system it would actually enforce. Without the verifier, permissions beyond owner/member are UI
   suggestions, not real boundaries — see `docs/experience.md` for the full reasoning
-- Invite links are single-use now (`deleteJoinAccess`, consumed right after a successful join), but
-  any participant — not just the session's owner — can currently mint one. Restricting that to the
-  owner needs a `role` check in `SessionView.vue`'s Invite button, which is easy client-side but,
-  like everything else here, not server-enforced until the capability verifier above exists
+- Invite links are single-use and expire after 10 minutes now (`claimJoinAccess`,
+  `isJoinAccessExpired` in `src/api/sessions.ts`), but any participant — not just the session's
+  owner — can currently mint one. Restricting that to the owner needs a `role` check in
+  `SessionView.vue`'s Invite button, which is easy client-side but, like everything else here, not
+  server-enforced until the capability verifier above exists
 
 ## Docs
 
@@ -74,10 +75,7 @@ One-time setup — tick these off as they're done:
 
 ## Known Issues
 
-- Two people completing the join flow from the exact same invite link at the same instant can both
-  still succeed — the single-use check happens after a successful join, not as an atomic claim
-  before one, so this isn't a hard guarantee. Would need the row deleted (or a redeemed flag
-  flipped) *before* the join completes, checked to have actually taken effect
+(Bugs, edge cases, platform-specific quirks)
 
 ## Ideas / Backlog (Low Priority)
 

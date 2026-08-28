@@ -197,11 +197,14 @@ being in the conversation, so hiding it from them buys nothing. What must stay h
 different fact of *which sessions a given identity belongs to across the whole table*, which is
 exactly what the `session_access` lookup-tag design above protects. `display_name` is set for a
 guest (a random name, `randomGuestName()`) and left `null` for an account holder, whose current
-username is resolved live instead of frozen at join time — `SessionView.vue`'s `applyParticipant`
-calls `fetchAccountByPublicKey` for any row with a null `display_name`, and the participant-name map
-is a Vue `reactive()` Map (not a plain one) specifically so the thread re-renders once that lookup
-resolves, rather than a message's sender staying stuck on the "Someone" fallback it showed before
-the async lookup finished.
+username is meant to be resolved live from `accounts` instead of frozen at join time —
+`src/api/sessionList.ts` does exactly that (`fetchAccountByPublicKey` for a null `display_name`) when
+building the "other participants" preview for a chat-list entry. `SessionView.vue`, by contrast,
+doesn't consult this table live at all when rendering a thread — see "a message's displayed sender
+name is self-declared" below for why, and note the one gap that leaves: the chat-list preview for a
+*migrated* guest identity still resolves via this row (guest key, frozen guest `display_name`), so it
+can show a stale guest name there even though the thread itself correctly shows the account's live
+username.
 
 **An account is just another identity — the same mechanism, a stable keypair.** Creating an account
 (`CreateAccount.vue`) generates a keypair exactly like a guest does, except the keypair is kept (a
@@ -251,31 +254,47 @@ so there is nothing to warn about losing — and the same flag (checked at mount
 route the current account already has access to) turns it off for a migrated guest session too, for
 the same reason.
 
-**An account can migrate a guest session it already holds, with zero special-casing in the render
-path.** A message's `sender` field (see below) is baked into its ciphertext at send time —
-immutable, unlike `display_name` or an account's username, which can both be resolved live. So
-"attach my guest session to my account" can't retroactively relabel history the way an ordinary
-account join can; the only way old and new messages keep resolving to the *same* participant is if
-they keep using the *same* public key id, forever. `migrateGuestSessionToAccount`
+**An account can migrate a guest session it already holds, keeping the same access identity
+forever.** A message's `sender` field (see below) is baked into its ciphertext at send time —
+immutable. So "attach my guest session to my account" can't retroactively rewrite who sent old
+messages, and the only way old and new messages keep counting as the *same participant* for access
+purposes is if they keep using the *same* public key id, forever. `migrateGuestSessionToAccount`
 (`src/api/sessionActions.ts`) does exactly that: it seals the account a **second** `session_access`
 row for the same session — sealed to the account's real public key as always, so only the account
 can find it via its own lookup tag — but the payload's `identityPublicKeyId` is pinned to the
 *guest's original public key*, not the account's. `SessionView.vue` and `sessionList.ts` both read
-`identityPublicKeyId ?? account.publicKeyId` wherever they'd otherwise use "my own public key," so a
-migrated session behaves, from the render path's perspective, exactly like a session nobody ever
-migrated: the one existing `session_participants` row (guest key, guest display name) is never
-touched, the account's real public key never has to appear anywhere in this session's data, and old
-messages / new messages / "mine" detection all keep working off the one unchanged identity. The
-guest's original personal link keeps working afterward too — migration only *adds* an access path,
-the same non-destructive philosophy as adding a participant to shared-key sessions in the first
-place. Idempotent by construction: re-migrating just finds the row `joinExistingSession`'s
-`alreadyHasAccess` check would also find, and returns without inserting a duplicate.
+`identityPublicKeyId ?? account.publicKeyId` wherever they'd otherwise use "my own public key," so
+`session_participants` is never touched, the account's real public key never has to appear anywhere
+in this session's data, and "mine" detection keeps working off the one unchanged identity for both
+old and new messages. What a migrated identity's messages are *labeled as* to everyone else is a
+separate question, answered by the sender-name design below — deliberately not by touching
+`session_participants` here. The guest's original personal link keeps working afterward too —
+migration only *adds* an access path, the same non-destructive philosophy as adding a participant to
+shared-key sessions in the first place. Idempotent by construction: re-migrating just finds the row
+`joinExistingSession`'s `alreadyHasAccess` check would also find, and returns without inserting a
+duplicate.
 
-**Messages carry their sender inside the ciphertext, not a column.** A decrypted message is
-`{ sender: <public key JSON>, text, createdAt }` (`src/lib/sessionTypes.ts`). `SessionView` decrypts
-each row with the session key, matches `sender` against its own public key for "mine" styling, and
-looks up everyone else's current name via the in-memory `session_participants` map kept live by a
-realtime subscription.
+**A message's displayed sender name is self-declared at send time, not resolved from
+`session_participants` afterward.** A decrypted message is
+`{ sender: <public key id>, senderName, text, createdAt }` (`src/lib/sessionTypes.ts`) — `senderName`
+is whatever the *sending* client considered its own best current name to be, baked in permanently at
+that moment: a guest's random name, or a logged-in account's live username. `SessionView.vue` only
+ever needs this to render a thread — matching `sender` against its own public key for "mine"
+styling, and printing `senderName` as-is for everyone else's messages. This is what makes a migrated
+identity's messages read correctly to *other* participants without either side learning anything new
+about the other: before `migrateGuestSessionToAccount` runs, a guest's messages
+say whatever their random name was; every message sent afterward, even though it's still sealed
+under that exact same pinned public key, bakes in the account's *current* username instead — because
+the account, not a stale row, is what supplied `senderName` at the moment of sending. A fellow
+participant who never logs anything in just sees the name change partway through the thread, with no
+way to prove it's the "same" identity beyond that — which is honest, since nothing here is signed or
+verified; it's exactly as self-reported as `session_participants.display_name` already was. Renaming
+an account only affects messages sent after the rename; earlier ones stay frozen at whatever name was
+true then, the same way `display_name` freezes a guest's name at join time. This needed no schema
+change and no extra table: `messages.ciphertext` already stores an arbitrary JSON payload.
+`session_participants` still exists and is read once at mount (to recover a *guest's own* frozen name
+for baking into messages they send), but is no longer subscribed to live or consulted to render
+anyone else's messages.
 
 **No "waiting for the other side" state anymore.** Because the session key isn't derived from a
 second person's public key, the creator has full read/write access to their own session the instant

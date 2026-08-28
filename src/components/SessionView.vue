@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   importPrivateKey,
   publicJwkFromPrivateJwk,
@@ -20,17 +20,14 @@ import {
   sendMessage,
   subscribeMessages,
   fetchParticipants,
-  subscribeParticipants,
   createJoinAccess,
   unsubscribe,
   toEnvelope,
-  type ParticipantRow,
 } from '../api/sessions'
 import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
-import { fetchAccountByPublicKey } from '../api/accounts'
 import { alreadyHasAccess, migrateGuestSessionToAccount } from '../api/sessionActions'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
@@ -45,7 +42,7 @@ const status = ref<Status>('loading')
 interface RenderedMessage {
   id: string
   mine: boolean
-  sender: string
+  senderName: string
   text: string
 }
 
@@ -61,29 +58,11 @@ let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
 let ownPublicKeyId = ''
 let ownRole: 'owner' | 'member' = 'member'
-// Reactive so the template re-renders once an account holder's username
-// resolves — see applyParticipant below.
-const participantNames = reactive(new Map<string, string>()) // public key id -> display name
+// Only used as a fallback when not logged in — see the participants lookup
+// in onMounted below and the comment on DecodedMessage.senderName.
+let ownDisplayName = 'Someone'
 const seenMessageIds = new Set<string>()
 let messageChannel: RealtimeChannel | null = null
-let participantChannel: RealtimeChannel | null = null
-
-function nameFor(publicKeyJson: string): string {
-  return participantNames.get(publicKeyJson) ?? 'Someone'
-}
-
-// A guest's display_name is set at join time and used as-is. An account
-// holder's is deliberately left null (system-design.md §3) so their current
-// username is resolved live instead of frozen at join time — that lookup
-// happens here.
-async function applyParticipant(row: ParticipantRow) {
-  if (row.display_name) {
-    participantNames.set(row.public_key, row.display_name)
-    return
-  }
-  const account = await fetchAccountByPublicKey(row.public_key)
-  participantNames.set(row.public_key, account?.username ?? 'Someone')
-}
 
 async function scrollToBottom() {
   await nextTick()
@@ -99,7 +78,7 @@ async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string
     messages.value.push({
       id: row.id,
       mine: plain.sender === ownPublicKeyId,
-      sender: plain.sender,
+      senderName: plain.senderName ?? 'Someone',
       text: plain.text,
     })
     scrollToBottom()
@@ -165,9 +144,14 @@ onMounted(async () => {
       migrated.value = await alreadyHasAccess(currentAccount.value, activeSessionId)
     }
 
-    const participants = await fetchParticipants(activeSessionId)
-    await Promise.all(participants.map(applyParticipant))
-    participantChannel = subscribeParticipants(activeSessionId, applyParticipant)
+    // Only a guest needs this: their own random name, assigned once at
+    // join time, is the fallback baked into messages they send. A logged-in
+    // account always uses its own live username instead — see send() below.
+    if (!currentAccount.value) {
+      const participants = await fetchParticipants(activeSessionId)
+      const myRow = participants.find((p) => p.public_key === ownPublicKeyId)
+      ownDisplayName = myRow?.display_name ?? 'Someone'
+    }
 
     const existing = await fetchMessages(activeSessionId)
     for (const row of existing) await decodeAndAppend(row)
@@ -182,7 +166,6 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (messageChannel) unsubscribe(messageChannel)
-  if (participantChannel) unsubscribe(participantChannel)
 })
 
 async function send() {
@@ -191,7 +174,8 @@ async function send() {
 
   sending.value = true
   try {
-    const payload: DecodedMessage = { sender: ownPublicKeyId, text, createdAt: new Date().toISOString() }
+    const senderName = currentAccount.value ? currentAccount.value.account.username : ownDisplayName
+    const payload: DecodedMessage = { sender: ownPublicKeyId, senderName, text, createdAt: new Date().toISOString() }
     const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(payload))
     const ok = await sendMessage(activeSessionId, ciphertext, iv)
     if (ok) {
@@ -428,7 +412,7 @@ function goHome() {
       <ul class="thread">
         <li v-if="!messages.length" class="empty">No messages yet — say hello.</li>
         <li v-for="m in messages" :key="m.id" :class="['bubble', m.mine ? 'mine' : 'theirs']">
-          <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
+          <span v-if="!m.mine" class="sender">{{ m.senderName }}</span>
           {{ m.text }}
         </li>
         <li ref="scrollAnchor" class="anchor"></li>

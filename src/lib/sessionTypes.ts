@@ -24,6 +24,17 @@ export interface JoinPayload {
 
 export interface DecodedMessage {
   sender: string
+  /**
+   * The sender's own best-known name for themselves, baked in at send time
+   * by the sending client — not resolved later from session_participants.
+   * This is what lets a migrated guest identity's later messages show the
+   * account's current username to everyone else, while earlier messages
+   * (sent before any account existed) keep showing whatever name was true
+   * then: each message is a frozen, self-reported snapshot, the same way
+   * session_participants.display_name already is — no new trust
+   * assumption, no new table, no re-resolving after the fact.
+   */
+  senderName: string
   text: string
   createdAt: string
 }

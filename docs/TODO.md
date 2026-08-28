@@ -30,11 +30,14 @@ link isn't enough" entries in `docs/system-design.md` §3.
 **Stage C: guest → account migration** (pending) — `migrateGuestSessionToAccount`
 (`src/api/sessionActions.ts`) adds an account's own `session_access` row to a session it currently
 only holds as a guest, without touching `session_participants` or re-keying anything: the new row
-pins `identityPublicKeyId` to the guest's original public key, so the session keeps presenting as
-that one identity forever — old messages (immutably tagged with that key at send time) and any new
-ones after migration resolve against the exact same participant row, with zero special-casing in
-`SessionView.vue`'s render path. See "An account can migrate a guest session it already holds" in
-`docs/system-design.md` §3.
+pins `identityPublicKeyId` to the guest's original public key, so the session keeps counting as that
+one identity for access purposes forever. What a message displays as its sender is a separate,
+self-declared field (`senderName`, baked in by the sending client at send time — no lookup, no new
+table) rather than something resolved from `session_participants` after the fact, which is what lets
+a migrated identity's *later* messages correctly show the account's live username to everyone else
+while earlier ones keep showing whatever name was true when they were sent. See "An account can
+migrate a guest session it already holds" and "A message's displayed sender name is self-declared"
+in `docs/system-design.md` §3.
 
 ## Next (Current Sprint)
 
@@ -84,7 +87,13 @@ One-time setup — tick these off as they're done:
 
 ## Known Issues
 
-(Bugs, edge cases, platform-specific quirks)
+- A migrated guest identity's entry in an account's chat list ("other participants" preview) can
+  still show the frozen guest name from `session_participants`, even though the thread itself
+  correctly shows that person's live account username (see "A message's displayed sender name is
+  self-declared" in `docs/system-design.md` §3). The list preview isn't built from message history,
+  so it has no `senderName` to read — would need either a schema change or a "most recent sender
+  name" lookup to fix, neither done yet since it's cosmetic (a list-row label), not a privacy or
+  correctness issue
 
 ## Ideas / Backlog (Low Priority)
 

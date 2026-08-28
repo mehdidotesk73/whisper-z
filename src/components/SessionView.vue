@@ -28,9 +28,10 @@ import {
 } from '../api/sessions'
 import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
-import { navigate, homeHash, joinHash } from '../lib/route'
-import { currentAccount } from '../lib/auth'
+import { navigate, homeHash, joinHash, parseHash, extractHash } from '../lib/route'
+import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
+import { alreadyHasAccess, migrateGuestSessionToAccount } from '../api/sessionActions'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
@@ -51,6 +52,7 @@ interface RenderedMessage {
 const messages = ref<RenderedMessage[]>([])
 const draft = ref('')
 const sending = ref(false)
+const migrated = ref(false) // this guest session already has an account attached to it
 const scrollAnchor = ref<HTMLElement>()
 const composerTextarea = ref<HTMLTextAreaElement>()
 
@@ -58,6 +60,7 @@ let activeSessionId = ''
 let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
 let ownPublicKeyId = ''
+let ownRole: 'owner' | 'member' = 'member'
 // Reactive so the template re-renders once an account holder's username
 // resolves — see applyParticipant below.
 const participantNames = reactive(new Map<string, string>()) // public key id -> display name
@@ -114,7 +117,8 @@ onMounted(async () => {
         return
       }
       privateKey = currentAccount.value.privateKey
-      ownPublicKeyId = currentAccount.value.publicKeyId
+      // ownPublicKeyId is set below once `access` is decrypted — a migrated
+      // guest session pins it to the original guest key, not the account's.
     } else if (props.packedKey) {
       const privateKeyJwk = unpackJwk(props.packedKey)
       privateKey = await importPrivateKey(privateKeyJwk)
@@ -151,6 +155,15 @@ onMounted(async () => {
     activeSessionId = access.sessionId
     sessionKeyJwk = access.sessionKey
     sessionKey = await importSessionKey(access.sessionKey)
+    ownRole = access.role
+    if (props.sessionId) {
+      ownPublicKeyId = access.identityPublicKeyId ?? currentAccount.value!.publicKeyId
+    } else if (currentAccount.value) {
+      // Viewing a guest link while already logged in — check whether this
+      // session has already been migrated, so "Add to account" doesn't
+      // offer to redo something that's done.
+      migrated.value = await alreadyHasAccess(currentAccount.value, activeSessionId)
+    }
 
     const participants = await fetchParticipants(activeSessionId)
     await Promise.all(participants.map(applyParticipant))
@@ -228,6 +241,7 @@ async function generateInvite() {
 
 async function toggleInvite() {
   showWarning.value = false
+  showMigrate.value = false
   showInvite.value = !showInvite.value
   if (showInvite.value && !inviteLink.value) await generateInvite()
 }
@@ -239,14 +253,16 @@ async function copyInvite() {
   }
 }
 
-// Warning only applies to a guest (packedKey) route — an account-backed
-// (sessionId) route is recoverable via the account's own link instead.
+// Warning only applies to a guest (packedKey) route that hasn't been
+// migrated to an account — an account-backed (sessionId) route, or a
+// migrated guest route, is recoverable via the account's own link instead.
 const showWarning = ref(false)
 const personalLink = props.packedKey ? `${location.origin}${location.pathname}#/session/${props.packedKey}` : ''
 const copiedPersonal = ref(false)
 
 function toggleWarning() {
   showInvite.value = false
+  showMigrate.value = false
   showWarning.value = !showWarning.value
 }
 
@@ -257,10 +273,71 @@ async function copyPersonal() {
   }
 }
 
+// "Add to account" only applies to a guest (packedKey) route, and only
+// before it's been migrated once (checked in onMounted for anyone already
+// logged in; migrating always safely no-ops a second time regardless).
+const showMigrate = ref(false)
+const migrating = ref(false)
+const migrateError = ref('')
+const migrateAccountLinkInput = ref('')
+
+function toggleMigrate() {
+  showInvite.value = false
+  showWarning.value = false
+  showMigrate.value = !showMigrate.value
+  migrateError.value = ''
+}
+
+async function migrateToAccount() {
+  if (!currentAccount.value || !sessionKeyJwk) return
+  migrating.value = true
+  migrateError.value = ''
+  try {
+    const ok = await migrateGuestSessionToAccount(
+      activeSessionId,
+      sessionKeyJwk,
+      ownRole,
+      ownPublicKeyId,
+      currentAccount.value,
+    )
+    if (!ok) {
+      migrateError.value = 'Could not add this session to your account — try again.'
+      return
+    }
+    migrated.value = true
+    showMigrate.value = false
+  } catch (err) {
+    logDebug(`migrateToAccount failed: ${err}`, 'error')
+    migrateError.value = 'Could not add this session to your account — try again.'
+  } finally {
+    migrating.value = false
+  }
+}
+
+async function loginThenMigrate() {
+  migrateError.value = ''
+  const pasted = migrateAccountLinkInput.value.trim()
+  if (!pasted) return
+
+  const parsed = parseHash(extractHash(pasted))
+  if (parsed.name !== 'account') {
+    migrateError.value = "That doesn't look like an account link — check you copied the whole thing."
+    return
+  }
+
+  const ok = await loginWithPackedKey(parsed.packedKey)
+  if (!ok) {
+    migrateError.value = "That account link didn't work — check you copied the whole thing."
+    return
+  }
+  await migrateToAccount()
+}
+
 function onDocClick(e: MouseEvent) {
   if (panelArea.value && !panelArea.value.contains(e.target as Node)) {
     showInvite.value = false
     showWarning.value = false
+    showMigrate.value = false
   }
 }
 onMounted(() => document.addEventListener('click', onDocClick))
@@ -276,7 +353,10 @@ function goHome() {
     <div class="top-bar">
       <button class="chip" @click="goHome">← Home</button>
       <button v-if="status === 'ready'" class="chip" @click.stop="toggleInvite">Invite</button>
-      <button v-if="status === 'ready' && props.packedKey" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
+      <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip" @click.stop="toggleMigrate">
+        + Add to account
+      </button>
+      <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
     </div>
 
     <div ref="panelArea">
@@ -307,6 +387,31 @@ function goHome() {
           <input readonly :value="personalLink" @focus="($event.target as HTMLInputElement).select()" />
           <button @click="copyPersonal">{{ copiedPersonal ? 'Copied ✓' : 'Copy' }}</button>
         </div>
+      </div>
+
+      <div v-if="showMigrate" class="link-block">
+        <template v-if="currentAccount">
+          <p class="hint">
+            Adds this session to <strong>{{ currentAccount.account.username }}</strong
+            >'s chat list. Nothing about this thread changes — this is just another way to reach it.
+          </p>
+          <button class="primary" :disabled="migrating" @click="migrateToAccount">
+            {{ migrating ? 'Adding…' : `Add to ${currentAccount.account.username}'s account` }}
+          </button>
+        </template>
+        <template v-else>
+          <label>Add to an account</label>
+          <p class="hint">Paste your account link to sign in and add this session to its chat list.</p>
+          <input
+            v-model="migrateAccountLinkInput"
+            placeholder="Paste your account link"
+            @keydown.enter="loginThenMigrate"
+          />
+          <button class="primary" :disabled="migrating || !migrateAccountLinkInput.trim()" @click="loginThenMigrate">
+            {{ migrating ? 'Adding…' : 'Log in & add' }}
+          </button>
+        </template>
+        <p v-if="migrateError" class="error">{{ migrateError }}</p>
       </div>
     </div>
 
@@ -449,6 +554,38 @@ function goHome() {
 .new-link:disabled {
   opacity: 0.6;
   text-decoration: none;
+}
+
+.link-block input {
+  padding: 0.6rem;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.link-block .primary {
+  align-self: flex-start;
+  padding: 0.6rem 1rem;
+  min-height: 44px;
+  background: var(--accent-blue);
+  color: #fff;
+  border: none;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.link-block .primary:disabled {
+  opacity: 0.6;
+}
+
+.link-block .error {
+  color: var(--danger);
+  margin: 0;
+  font-size: 0.85rem;
 }
 
 .thread {

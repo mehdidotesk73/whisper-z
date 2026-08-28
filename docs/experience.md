@@ -105,9 +105,39 @@ removed the old "waiting for the other person to join" state entirely: since the
 from a second person's public key, the creator has full access to their own session — and can start
 typing — the instant it's created.
 
+**A whole-JWK string comparison silently broke identity matching.** Stage A's live 3-person test
+showed every participant as a generic "Someone" except "mine" (which worked by accident). The cause:
+one code path compared `JSON.stringify(publicJwkFromPrivateJwk(jwk))` (a hand-rolled object literal)
+against `JSON.stringify(await exportPublicKey(key))` (the browser's native `exportKey`) — same key,
+different field insertion order (`key_ops,ext,kty,x,y,crv` vs. `kty,crv,x,y,ext,key_ops`), so
+`JSON.stringify` never matched even though the key did. "Mine" only worked because both sides of
+that one comparison happened to go through the same hand-rolled function. Fixed with
+`canonicalPublicKeyId(jwk) = \`${jwk.x}.${jwk.y}\`` — compare only the two fields that actually
+identify a P-256 key — used at every identity-string call site. Verified with a script reproducing
+the exact field-order mismatch before touching the app, then a 3-participant simulation after the
+fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their key material.
+
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)
+
+### v0.5.0 — 2026-08-28 (Stage B: accounts + hidden session index)
+- **Added:** accounts (`src/api/accounts.ts`, `src/lib/auth.ts`) — a keypair + username identity
+  that reuses the guest session-access mechanism verbatim, except the keypair is stable across
+  every session it touches
+- **Added:** `AccountHome.vue`, a chat list built entirely client-side by
+  `src/api/sessionList.ts` decrypting an account's own `session_access` rows — the server-side
+  query is still just "how many rows does this tag have"
+- **Added:** `#/mysession/<sessionId>` route + `#/account/<packedKey>` route (`src/lib/route.ts`);
+  `SessionView.vue` now accepts either a guest `packedKey` or an account `sessionId` prop, and hides
+  the personal-link Warning control for the latter (recoverable via the account link instead)
+- **Added:** `src/api/sessionActions.ts` — shared `startNewSession`/`joinExistingSession` so guest
+  and account identities go through identical seal/lookup-tag/participant steps, called from both
+  `SessionHome.vue`/`JoinSession.vue` (guest) and `AccountHome.vue` (account)
+- **Extended:** `SessionAccessPayload` gained an optional `title` field, stored in the same sealed
+  envelope — no new table needed for a session's display name
+- See "An account is just another identity" and "Why a personal link isn't enough" in
+  `docs/system-design.md` §3 for the full design reasoning
 
 ### v0.4.0 — 2026-08-27 (Stage A of the session-model rebuild)
 - **Rebuilt:** the entire chat data model and crypto layer around a hidden membership graph and a
@@ -119,7 +149,10 @@ typing — the instant it's created.
 - **Removed:** the old two-party-only `sessions.starter_public_key`/`joiner_public_key` shape, the
   "waiting for the other person to join" state, and the `role: starter|joiner` URL parameter
 - **Added:** guest display names (`randomGuestName`), an Invite/Warning control pair on the session
-  view replacing the old two-link intermediate screen
+  view replacing the old two-link intermediate screen — opening one closes the other, and clicking
+  outside either closes whichever is open
+- **Fixed:** a whole-JWK string comparison was silently breaking identity matching, showing every
+  guest as "Someone" — see `canonicalPublicKeyId` above
 - **Deferred (tracked in `docs/TODO.md`):** accounts, guest→account migration, multi-participant
   invites with an accept/view-only flow, server-side capability verification
 

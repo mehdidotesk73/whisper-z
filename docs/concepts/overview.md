@@ -17,9 +17,19 @@ From inside the session:
 
 ## Joining a session
 
-Open the invite link you were sent and tap **Join session**. This generates your own keypair and
-adds you to the conversation — you'll land in the same thread, with your own personal link
-available the same way.
+Open the invite link you were sent and tap **Join session**. If you're not signed in, this
+generates your own keypair and adds you to the conversation — you'll land in the same thread, with
+your own personal link available the same way. If you're signed in to an account, it's added
+straight to your chat list instead — no link to save.
+
+## Accounts
+
+An account keeps a chat list, so you don't need to save a personal link for every session — tap
+**Create an account**, pick a username, and save the **account link** it shows you once. That link
+is the only way to sign back in on another device or after clearing your browser; there's still no
+password and no recovery. Once signed in, starting or joining a session adds it to your list
+automatically, and the personal-link Warning no longer applies to sessions opened from an account,
+since the account link already covers that.
 
 ## Chatting
 

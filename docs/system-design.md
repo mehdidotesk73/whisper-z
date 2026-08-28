@@ -9,9 +9,9 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 - **Header/footer shell** — app title, Help modal, build/version info, reload affordance, debug panel
 - **Service-worker caching** — offline capability, smart update detection
 - **Mobile-first UX** — responsive, touch-optimized, no hover-only interactions
-- **Three screens** (`src/components/SessionHome.vue`, `JoinSession.vue`, `SessionView.vue`),
-  switched by a hash-based router (`src/lib/route.ts`) — no `vue-router`, just enough parsing for
-  three link shapes
+- **Five screens** (`src/components/SessionHome.vue`, `AccountHome.vue`, `CreateAccount.vue`,
+  `JoinSession.vue`, `SessionView.vue`), switched by a hash-based router (`src/lib/route.ts`) — no
+  `vue-router`, just enough parsing for five link shapes
 - **Pure computation layer** (`src/lib/`) — key agreement, sealed envelopes, encrypt/decrypt,
   routing, clipboard
 - **Data layer** (`src/api/`) — the Supabase client and opaque-record reads/writes/realtime
@@ -34,7 +34,9 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 │  │  ├─ DebugPanel                    │  │
 │  │  ├─ UpdateAvailablePrompt         │  │
 │  │  └─ route.ts picks one of:        │  │
-│  │   SessionHome│JoinSession│SessionView│
+│  │   SessionHome│AccountHome│        │  │
+│  │   CreateAccount│JoinSession│      │  │
+│  │   SessionView                     │  │
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
 │  │  lib/ (pure functions)            │  │
@@ -48,9 +50,18 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 │  ┌───────────────────────────────────┐  │
 │  │  api/ (Supabase data access)      │  │
 │  │  ├─ supabase.ts (client)          │  │
-│  │  └─ sessions.ts (opaque reads/    │  │
-│  │      writes/realtime — the client │  │
-│  │      decrypts, the API doesn't)   │  │
+│  │  ├─ sessions.ts (opaque reads/    │  │
+│  │  │   writes/realtime — the client │  │
+│  │  │   decrypts, the API doesn't)   │  │
+│  │  ├─ accounts.ts (username ↔       │  │
+│  │  │   public key — the one         │  │
+│  │  │   intentionally searchable     │  │
+│  │  │   identity kind)               │  │
+│  │  ├─ sessionActions.ts (shared     │  │
+│  │  │   start/join, account-aware)   │  │
+│  │  └─ sessionList.ts (decrypts an   │  │
+│  │      account's own session_access │  │
+│  │      rows into a chat list)       │  │
 │  └───────────────────────────────────┘  │
 └──────────────────┬──────────────────────┘
                     │ nothing but ciphertext and
@@ -114,6 +125,15 @@ session_participants (                                       -- who's in a sessi
 messages (
   id uuid pk, session_id fk → sessions, ciphertext text, iv text, created_at
 )
+
+accounts (                                                    -- a stable, intentionally searchable identity
+  id uuid pk, username text unique, public_key text unique, created_at
+)
+
+private_account_state (                                       -- reserved for Stage C (guest→account migration)
+  id uuid pk, owner_pub text, ciphertext text, iv text,
+  ephemeral_public_key text, created_at
+)
 ```
 
 **One shared key per session, not a key per pair.** Whoever starts a session generates a single
@@ -165,6 +185,32 @@ different fact of *which sessions a given identity belongs to across the whole t
 exactly what the `session_access` lookup-tag design above protects. `display_name` is set for a
 guest (a random name, `randomGuestName()`) and left `null` for an account holder once accounts
 exist, whose current username is meant to be resolved live instead of frozen at join time.
+
+**An account is just another identity — the same mechanism, a stable keypair.** Creating an account
+(`CreateAccount.vue`) generates a keypair exactly like a guest does, except the keypair is kept (a
+packed private key in `localStorage`, plus an `#/account/<packedKey>` link for another device) and
+reused as-is for every session the account touches, instead of a fresh one per session. It calls
+`deriveLookupTag(accountPrivateKey, 'session-access')` — the *same* function, the *same* purpose
+string — so `session_access` doesn't need to know or care whether a row's owner is a guest or an
+account. The one difference this stability buys: because the tag never changes, one query
+(`fetchSessionAccessForOwner`) returns every `session_access` row the account has ever been sealed
+into, which `src/api/sessionList.ts` decrypts into a chat list. `accounts.public_key` is the one
+identity value in this schema that's deliberately plaintext and searchable — that's what lets
+someone start a session targeted at an account by its username-resolved public key, and what lets a
+chat list resolve a fellow participant's current username. It is never used as `session_access`'s
+lookup column; that stays the private-key-derived tag, so a database dump still can't connect an
+account to the sessions it holds.
+
+**Why a personal link isn't enough once an account exists: the `mysession` route.** A bare private
+key resolves to "whichever `session_access` row that tag has" — fine when there's exactly one, which
+is true for every guest identity by construction (a fresh keypair per session). An account's tag can
+have many. So opening a session from a chat list uses `#/mysession/<sessionId>` instead of
+`#/session/<packedKey>`: `SessionView` uses the *logged-in account's* keypair to fetch every row
+under its tag, then opens each envelope until it finds the one whose decrypted `sessionId` matches
+the route — the id in the URL is just a disambiguator, never a capability, since it's meaningless
+without the account's private key to actually open anything. This is also the flag that turns off
+the **Warning** control: an account-backed session is always recoverable via the account's own link,
+so there is nothing to warn about losing.
 
 **Messages carry their sender inside the ciphertext, not a column.** A decrypted message is
 `{ sender: <public key JSON>, text, createdAt }` (`src/lib/sessionTypes.ts`). `SessionView` decrypts
@@ -226,9 +272,11 @@ Organized by feature. Keep them thin — mostly templating, logic lives in `lib/
 ```
 src/components/
   HelpModal.vue       renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
-  SessionHome.vue     "Start a session" + paste-a-link box
-  JoinSession.vue     redeem an invite link, generating a fresh identity
-  SessionView.vue     the thread — opens immediately, Invite/Warning controls, composer
+  SessionHome.vue     logged-out home: "Start a session" + paste-a-link box + "Create an account"
+  AccountHome.vue     logged-in home: chat list (src/api/sessionList.ts) + "Start a session"
+  CreateAccount.vue   generate an account keypair + username, reveal its one-time account link
+  JoinSession.vue     redeem an invite link — account-aware via sessionActions.ts
+  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId
 ```
 
 ## §7 — Build, Deploy & Conventions

@@ -11,6 +11,8 @@ import {
   exportPrivateKey,
   generateSessionKey,
   exportSessionKey,
+  importSessionKey,
+  encryptText,
   sealForRecipient,
   openSealed,
   deriveLookupTag,
@@ -77,7 +79,8 @@ export async function startNewSession(account: CurrentAccount | null, title?: st
   if (!ok) return null
 
   const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
-  await addParticipant(sessionId, publicKeyId)
+  const participantEntry = await encryptText(sessionKey, publicKeyId)
+  await addParticipant(sessionId, participantEntry.ciphertext, participantEntry.iv)
 
   const packedKey = account ? null : packJwk(await exportPrivateKey(identity.privateKey))
   return { sessionId, packedKey }
@@ -104,8 +107,10 @@ export async function joinExistingSession(
   const ok = await insertSessionAccess(ownerPub, sealed)
   if (!ok) return null
 
+  const sessionKey = await importSessionKey(joinPayload.sessionKey)
   const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
-  await addParticipant(joinPayload.sessionId, publicKeyId)
+  const participantEntry = await encryptText(sessionKey, publicKeyId)
+  await addParticipant(joinPayload.sessionId, participantEntry.ciphertext, participantEntry.iv)
 
   const packedKey = account ? null : packJwk(await exportPrivateKey(identity.privateKey))
   return { sessionId: joinPayload.sessionId, packedKey }
@@ -147,6 +152,8 @@ export async function migrateGuestSessionToAccount(
   const ok = await insertSessionAccess(ownerPub, sealed)
   if (!ok) return false
 
-  await addParticipant(sessionId, account.publicKeyId)
+  const sessionKey = await importSessionKey(sessionKeyJwk)
+  const participantEntry = await encryptText(sessionKey, account.publicKeyId)
+  await addParticipant(sessionId, participantEntry.ciphertext, participantEntry.iv)
   return true
 }

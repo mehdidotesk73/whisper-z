@@ -125,6 +125,20 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 - **Added:** `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) — adds an account's own
   `session_access` row to a session it currently only holds as a guest, plus a new
   `session_participants` row for the account's real key; the guest's original row is never touched
+- **Fixed a real, already-shipped vulnerability, found through the user's own architecture review of
+  this table:** `session_participants.public_key` stored an account's real public key in plaintext.
+  Because an account reuses that same key across every session it joins, and RLS is `using (true)`,
+  anyone with database access could run `select session_id from session_participants where
+  public_key = X` and recover the exact membership graph `session_access`'s lookup-tag design exists
+  to hide — for every account, though not guests (one-off keys per session). Fixed by symmetrically
+  encrypting each row's identity with the session's own shared key, reusing `encryptText`/
+  `decryptText` (the exact functions `messages` already use) instead of ECDH sealing — no
+  `ephemeral_public_key` needed, since anyone holding the session key is already a legitimate
+  participant. `session_id` stays a plaintext lookup column (existence/count, not identity, same
+  accepted leak as `messages.session_id`). Verified with a standalone script: no plaintext identity
+  recoverable from a raw row dump, a legitimate session-key holder decrypts correctly, the wrong
+  session's key fails outright. See "`session_participants` is keyed by plaintext `session_id`" in
+  `docs/system-design.md` §3
 - **Added:** `+ Add to account` control on `SessionView.vue` (a guest-routed session only): one tap
   if already logged in, or paste-an-account-link-and-log-in-then-migrate if not
 - **Redesigned (twice, after live testing) how a message's sender name is determined.** First pass
@@ -133,9 +147,9 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   prompted by a sharper design from live testing, replaced that with fully live resolution: a
   message carries only `sender` (its public key); `SessionView.vue`'s `nameFor` resolves that key
   against `accounts` every time, falling back to `guestNameForKey` — a deterministic, storage-free
-  name hashed from the key itself — when it isn't one. `session_participants.display_name` is now
-  unused everywhere; `sessionList.ts`'s chat-list preview uses the exact same resolution as the
-  thread, closing a gap the first pass had left open
+  name hashed from the key itself — when it isn't one. `session_participants` has never stored a
+  name; `sessionList.ts`'s chat-list preview uses the exact same resolution as the thread, closing a
+  gap the first pass had left open
 - **Added:** `guestNameForKey` (`src/lib/guestName.ts`) replaces `randomGuestName` — same word lists,
   but deterministic (a hash of the public key, not `Math.random()`) so no name needs to be generated
   or stored at join time at all, and a 3-character base36 suffix on top of color×noun to cut

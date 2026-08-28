@@ -144,24 +144,33 @@ export async function claimJoinAccess(joinId: string): Promise<JoinAccessRow | n
   return data as JoinAccessRow | null
 }
 
-// --- session_participants: the shared, plaintext "who's in this session" --
-// Fine to be plaintext: within a session everyone already knows who else is
-// in it. Just an enumeration of public keys — display names are never
-// stored here; they're resolved per-message from `sender` instead (see
-// docs/system-design.md §3), live against `accounts` with a deterministic
-// fallback (`guestNameForKey`) for a key that isn't one.
+// --- session_participants: "who's in this session", encrypted with the --
+// session's own shared key. `session_id` stays a plaintext lookup column —
+// "this session has N participant rows" is the same accepted metadata leak
+// as `messages.session_id` already being plaintext — but each row's public
+// key is sealed inside `ciphertext`, symmetrically, with the exact same
+// session key `messages` are encrypted with (see encryptText/decryptText in
+// lib/crypto.ts — no ECDH, no ephemeral key needed: anyone who legitimately
+// holds the session key is already a real participant). Without that key, a
+// full database dump shows sessions exist and roughly how many people are
+// in each, but never which public keys — closing a real gap the previous,
+// plaintext `public_key` column left open: an account uses the same real
+// key every time it joins a session, so a plaintext column here would have
+// let anyone query "every session this public key has ever joined" directly,
+// exactly the membership graph `session_access`'s lookup-tag design exists
+// to hide. Display names are never stored here regardless; they're resolved
+// per-message from `sender` instead (see docs/system-design.md §3).
 
 export interface ParticipantRow {
   id: string
   session_id: string
-  public_key: string
+  ciphertext: string
+  iv: string
   created_at: string
 }
 
-export async function addParticipant(sessionId: string, publicKeyJson: string): Promise<boolean> {
-  const { error } = await supabase
-    .from('session_participants')
-    .insert({ session_id: sessionId, public_key: publicKeyJson })
+export async function addParticipant(sessionId: string, ciphertext: string, iv: string): Promise<boolean> {
+  const { error } = await supabase.from('session_participants').insert({ session_id: sessionId, ciphertext, iv })
 
   if (error) {
     logDebug(`addParticipant failed: ${error.message}`, 'error')

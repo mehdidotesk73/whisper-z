@@ -36,9 +36,15 @@ from `sender`, against `accounts`, with a deterministic (no-lookup) fallback nam
 key itself (`guestNameForKey`, `src/lib/guestName.ts`) for a key that isn't one. That's what makes a
 migrated identity's *later* messages correctly show the account's current username to everyone else
 while its *earlier* ones keep resolving to the same guest name they always did — nothing here treats
-"migrated" as a special case anywhere in the render path. See "An account can migrate a guest session
-it already holds" and "A message's displayed sender name is resolved live" in
-`docs/system-design.md` §3.
+"migrated" as a special case anywhere in the render path. Also fixed, found through the user's own
+review of the table's design: `session_participants` used to store an account's real public key in
+plaintext, which — combined with `using (true)` RLS — let anyone with database access recover which
+sessions an account has ever joined directly, defeating `session_access`'s whole hidden-membership-
+graph design for every account (not guests). Each row's identity is now symmetrically encrypted with
+the session's own shared key instead (same functions `messages` already uses), leaving only
+`session_id` as plaintext lookup metadata. See "An account can migrate a guest session it already
+holds", "A message's displayed sender name is resolved live", and "`session_participants` is keyed by
+plaintext `session_id`" in `docs/system-design.md` §3.
 
 ## Next (Current Sprint)
 

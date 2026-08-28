@@ -117,10 +117,8 @@ join_access (                                                -- a redeemable inv
   id uuid pk, ciphertext text, iv text, created_at, consumed_at nullable
 )
 
-session_participants (                                       -- who's in a session (plaintext — see below)
-  id uuid pk, session_id fk → sessions, public_key text, created_at
-  -- display_name text nullable also exists but is unused — names are
-  -- always resolved live from a public key now, never stored
+session_participants (                       -- who's in a session — session_id plaintext, identity encrypted
+  id uuid pk, session_id fk → sessions, ciphertext text, iv text, created_at
 )
 
 messages (
@@ -153,11 +151,11 @@ recovers the same shared secret. Every encrypted table in this schema — `sessi
 here is a new algorithm, just ECDH + AES-GCM applied to a one-time keypair instead of a long-term
 identity.
 
-**Why `session_access.owner_pub` isn't a real public key.** A participant's actual public key is
-already public information (`session_participants.public_key`, or an account's directory entry in
-a later stage) — using it directly as the lookup column for "which sessions does this identity
-have" would let anyone who already knows that public key run exactly that query and reconstruct the
-membership graph. Instead, `owner_pub` is `deriveLookupTag(privateKey, 'session-access')`: a
+**Why `session_access.owner_pub` isn't a real public key.** An account's actual public key is
+already public information (`accounts.public_key`, intentionally searchable) — using it directly as
+the lookup column for "which sessions does this identity have" would let anyone who already knows
+that public key run exactly that query and reconstruct the membership graph. Instead, `owner_pub` is
+`deriveLookupTag(privateKey, 'session-access')`: a
 SHA-256 digest of the private key's scalar plus a purpose string. It's stable (the same identity
 always re-derives the same tag, so one query finds every session_access row it owns), but
 computable *only* by whoever holds the private key — the public key alone gives no way to compute
@@ -192,14 +190,31 @@ cron job is needed to close that window. Inviting a second person means generati
 can currently mint an invite link — restricting that to the owner is one of the still-open gaps
 tracked in `docs/TODO.md`, alongside real (server-verified) role enforcement.
 
-**`session_participants` is deliberately plaintext, and that's fine.** It holds who's in a
-*specific, already-known* session — every legitimate participant already sees this by definition of
-being in the conversation, so hiding it from them buys nothing. What must stay hidden is the
-different fact of *which sessions a given identity belongs to across the whole table*, which is
-exactly what the `session_access` lookup-tag design above protects. It's purely an enumeration of
-public keys now — no name is stored here at all; see "a message's displayed sender name is resolved
-live" below for how both the thread and the chat-list "other participants" preview turn a public key
-into a name, identically, on demand.
+**`session_participants` is keyed by plaintext `session_id`, but each row's identity is encrypted —
+this was a real vulnerability until it wasn't.** An earlier version of this table stored a
+participant's public key as a plaintext column. That looked harmless — every legitimate participant
+already sees who else is in a *specific, already-known* session by definition of being in the
+conversation — but it quietly reopened exactly the leak `session_access`'s lookup-tag design exists
+to close: an account uses the *same real public key* every time it joins or starts a session, so a
+plaintext `public_key` column, combined with RLS set to `using (true)`, let anyone with database
+access run `select session_id from session_participants where public_key = X` directly and
+reconstruct the complete list of sessions that account has ever touched — the membership graph,
+recovered through a side door. Guests were never exposed this way (a one-off keypair isn't linkable
+to anything else), but any account participating normally was.
+
+The fix reuses a pattern already in the schema rather than inventing one: each row's identity is now
+symmetrically encrypted with that *session's own shared key* — the exact same key and the exact same
+`encryptText`/`decryptText` functions `messages` already use. No ECDH, no `ephemeral_public_key`
+column needed here, because this isn't sealed to one specific recipient — anyone who legitimately
+holds the session key (i.e., is already a real participant, via their own `session_access` row) can
+decrypt every row for that session. `session_id` stays a plaintext lookup column — "this session has
+N participant rows" is the same class of accepted metadata leak as `messages.session_id` already
+being plaintext (existence and rough activity level, never identity) — but a raw database dump can no
+longer be searched by public key at all. Joining still costs one insert of your own new row,
+encrypted with a key you already have in hand at that point; nobody else's row is ever rewritten. See
+"a message's displayed sender name is resolved live" below for how both the thread and the chat-list
+"other participants" preview turn a decrypted public key into a name, identically, on demand — no
+name is ever stored here, encrypted or otherwise.
 
 **An account is just another identity — the same mechanism, a stable keypair.** Creating an account
 (`CreateAccount.vue`) generates a keypair exactly like a guest does, except the keypair is kept (a
@@ -298,10 +313,11 @@ the truth now" over "freeze what was true when it was sent," and it costs nothin
 table was always the source of truth for what an account is called.
 
 `session_participants` still exists and still matters — not for names, but as the enumeration
-`sessionList.ts` needs to know who's "in" a session without decrypting every message in it — but it
-no longer stores a name at all (its `display_name` column is unused going forward; `addParticipant`
-stopped writing to it). Displayed names anywhere in the app — the thread, and a chat-list "other
-participants" preview — are always computed the same way, from a public key, on demand.
+`sessionList.ts` needs to know who's "in" a session without decrypting every message in it. It has
+never stored a name — only an encrypted public key (see "`session_participants` is keyed by
+plaintext `session_id`" above) — so displayed names anywhere in the app — the thread, and a
+chat-list "other participants" preview — are always computed the same way, from a public key, on
+demand.
 
 A resolved name (an account's own username, unbounded in length) is truncated to 20 characters with
 a trailing `…` wherever the thread renders it (`truncateName`, `lib/guestName.ts`) — display-only,

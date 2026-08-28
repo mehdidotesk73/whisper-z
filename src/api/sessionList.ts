@@ -1,7 +1,7 @@
 // Builds an account's chat list by decrypting its own session_access rows
 // client-side — the server-side query only ever sees a lookup tag with some
 // number of rows, never which sessions they decrypt to.
-import { deriveLookupTag, openSealed } from '../lib/crypto'
+import { deriveLookupTag, openSealed, importSessionKey, decryptText } from '../lib/crypto'
 import { fetchSessionAccessForOwner, fetchParticipants, toEnvelope } from './sessions'
 import { fetchAccountsByPublicKeys } from './accounts'
 import { guestNameForKey } from '../lib/guestName'
@@ -27,12 +27,20 @@ export async function fetchSessionList(account: CurrentAccount): Promise<Session
       // key (used going forward) and the pinned original guest key (used by
       // messages sent before migration) — see migrateGuestSessionToAccount.
       const myIds = new Set([account.publicKeyId, payload.identityPublicKeyId].filter(Boolean))
-      const participants = await fetchParticipants(payload.sessionId)
-      const others = participants.filter((p) => !myIds.has(p.public_key))
 
-      const linkedAccounts = await fetchAccountsByPublicKeys(others.map((p) => p.public_key))
+      // session_participants rows are encrypted with the session's shared
+      // key (see docs/system-design.md §3) — decrypt each to recover the
+      // plaintext public key it names.
+      const sessionKey = await importSessionKey(payload.sessionKey)
+      const participantRows = await fetchParticipants(payload.sessionId)
+      const publicKeys = await Promise.all(
+        participantRows.map((p) => decryptText(sessionKey, { ciphertext: p.ciphertext, iv: p.iv })),
+      )
+      const others = publicKeys.filter((publicKey) => !myIds.has(publicKey))
+
+      const linkedAccounts = await fetchAccountsByPublicKeys(others)
       const usernameByKey = new Map(linkedAccounts.map((a) => [a.public_key, a.username]))
-      const otherParticipants = others.map((p) => usernameByKey.get(p.public_key) ?? guestNameForKey(p.public_key))
+      const otherParticipants = others.map((publicKey) => usernameByKey.get(publicKey) ?? guestNameForKey(publicKey))
 
       items.push({ sessionId: payload.sessionId, title: payload.title ?? null, role: payload.role, otherParticipants })
     } catch {

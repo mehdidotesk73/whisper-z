@@ -21,6 +21,11 @@ onMounted(async () => {
       status.value = 'invalid'
       return
     }
+    if (row.consumed_at) {
+      invalidReason.value = 'This invite link has already been used.'
+      status.value = 'invalid'
+      return
+    }
     if (isJoinAccessExpired(row)) {
       invalidReason.value = 'This invite link has expired — ask for a new one.'
       status.value = 'invalid'

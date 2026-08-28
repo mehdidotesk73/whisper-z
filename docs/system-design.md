@@ -114,7 +114,7 @@ session_access (                                            -- "who can find thi
 )
 
 join_access (                                                -- a redeemable invite link
-  id uuid pk, ciphertext text, iv text, created_at
+  id uuid pk, ciphertext text, iv text, created_at, consumed_at nullable
 )
 
 session_participants (                                       -- who's in a session (plaintext — see below)
@@ -174,18 +174,22 @@ Tapping Invite generates 32 random bytes (`generateJoinSecret`) used directly as
 no key agreement, since there's no recipient identity yet to agree with. The `join_access` row's
 ciphertext (session id + session key) is encrypted with those bytes; the link
 (`#/join/<joinId>/<secret>`) carries a plain lookup id (safe — it's not secret on its own) and the
-secret in the fragment. Redeeming it (`claimJoinAccess`) is a single `DELETE ... RETURNING`
-statement, not a read followed by a separate delete — Postgres only lets one of any number of
-concurrent callers actually delete a given row, so if two people click "Join" on the same link at
-once, exactly one gets the row back and the other gets `null`. That's what makes this genuinely
-single-use rather than best-effort. It also expires: `isJoinAccessExpired` compares `created_at`
-against a 10-minute TTL (`JOIN_LINK_TTL_MS`), checked both when the link is first opened (so a stale
-link shows as invalid immediately) and again at the atomic claim (so a link that goes stale between
-opening and clicking "Join" still can't be redeemed) — no cron job needed, since an expired row is
-simply deleted the next time anyone tries to claim it. Inviting a second person means generating a
-second link (the Invite panel's "New link, for another person"). Any participant, not just the
-session's owner, can currently mint an invite link — restricting that to the owner is one of the
-still-open gaps tracked in `docs/TODO.md`, alongside real (server-verified) role enforcement.
+secret in the fragment. Redeeming it (`claimJoinAccess`) is a single `UPDATE ... WHERE consumed_at
+IS NULL RETURNING` statement, not a read followed by a separate write — Postgres only lets one of
+any number of concurrent callers actually see `consumed_at IS NULL` still true and win, so if two
+people click "Join" on the same link at once, exactly one gets the row back and the other gets
+`null`. That's what makes this genuinely single-use rather than best-effort. The row is marked
+consumed rather than deleted specifically so a later visit can tell "already used" apart from
+"never existed" — `fetchJoinAccess` (the read-only check that runs when the link is first opened,
+before anyone has clicked "Join") looks at `consumed_at` for that message; merely opening a link,
+used or not, never mutates anything, so it can't itself grant access. It also expires:
+`isJoinAccessExpired` compares `created_at` against a 10-minute TTL (`JOIN_LINK_TTL_MS`), checked
+both on open and again at the atomic claim, so a link that goes stale between opening and clicking
+"Join" still can't be redeemed — attempting to claim an expired link consumes it on the spot, so no
+cron job is needed to close that window. Inviting a second person means generating a second link
+(the Invite panel's "New link, for another person"). Any participant, not just the session's owner,
+can currently mint an invite link — restricting that to the owner is one of the still-open gaps
+tracked in `docs/TODO.md`, alongside real (server-verified) role enforcement.
 
 **`session_participants` is deliberately plaintext, and that's fine.** It holds who's in a
 *specific, already-known* session — every legitimate participant already sees this by definition of

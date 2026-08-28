@@ -81,6 +81,7 @@ export interface JoinAccessRow {
   ciphertext: string
   iv: string
   created_at: string
+  consumed_at: string | null
 }
 
 export const JOIN_LINK_TTL_MS = 10 * 60 * 1000
@@ -103,26 +104,38 @@ export async function createJoinAccess(envelope: { ciphertext: string; iv: strin
   return data.id as string
 }
 
-/** Read-only lookup — used to validate a link (exists, not expired, secret matches) before showing "Join". */
+/**
+ * Read-only lookup — used to validate a link (exists, not already consumed,
+ * not expired, secret matches) before showing "Join". Never mutates
+ * anything, so merely opening a link — even one that's stale or already
+ * used — can't itself grant access; only claimJoinAccess below can.
+ */
 export async function fetchJoinAccess(joinId: string): Promise<JoinAccessRow | null> {
-  const { data, error } = await supabase.from('join_access').select('*').eq('id', joinId).single()
+  const { data, error } = await supabase.from('join_access').select('*').eq('id', joinId).maybeSingle()
 
   if (error) {
     logDebug(`fetchJoinAccess failed: ${error.message}`, 'error')
     return null
   }
-  return data as JoinAccessRow
+  return data as JoinAccessRow | null
 }
 
 /**
- * Atomically consumes a join link: a `DELETE ... RETURNING` is a single
- * statement, so if two people click "Join" on the same link at once,
- * Postgres lets exactly one of them actually delete the row (and get it
- * back) — the other's delete affects zero rows and gets null. That's what
- * makes this single-use for real, not just "delete after the fact."
+ * Atomically consumes a join link: `UPDATE ... WHERE consumed_at IS NULL
+ * RETURNING` is a single statement, so if two people click "Join" on the
+ * same link at once, Postgres only lets one of them see `consumed_at IS
+ * NULL` still true and win — the other's update matches zero rows and gets
+ * null back. The row is marked, not deleted, so a later visit can still
+ * tell "already used" apart from "never existed."
  */
 export async function claimJoinAccess(joinId: string): Promise<JoinAccessRow | null> {
-  const { data, error } = await supabase.from('join_access').delete().eq('id', joinId).select('*').maybeSingle()
+  const { data, error } = await supabase
+    .from('join_access')
+    .update({ consumed_at: new Date().toISOString() })
+    .eq('id', joinId)
+    .is('consumed_at', null)
+    .select('*')
+    .maybeSingle()
 
   if (error) {
     logDebug(`claimJoinAccess failed: ${error.message}`, 'error')

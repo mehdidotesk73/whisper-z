@@ -52,9 +52,76 @@ default content }`. Same shape as the `__BUILD_ID__` entry above: Vite's runtime
 TypeScript's view of the world are two separate things, and a working build doesn't mean a passing
 type-check until both agree.
 
+### Rebuilding the Chat Model for a Hidden Membership Graph
+
+The original chat flow (v0.2.0) had a real limitation once the goal became "hide which sessions an
+account belongs to from anyone with just database access": `sessions.starter_public_key` /
+`joiner_public_key` and the pairwise-ECDH-derived message key both assumed exactly two people whose
+public keys sit in plain, joinable columns. Extending that to a hidden index or more than two
+participants wasn't a migration — it needed a different foundation. Since no real data existed yet
+(nothing to lose), the whole schema and crypto layer were rebuilt from `main` rather than patched.
+
+**A full cryptographic-capability design was evaluated and deliberately scoped down.** A detailed
+proposal (Ed25519/X25519/XChaCha20-Poly1305, HKDF-derived permission capabilities like
+`K_INVITE_MEMBER`/`K_GRANT_ADMIN`, signed authorization chains, a Supabase Edge Function as the
+sole server-side verifier) was reviewed for structural feasibility. Nothing in it was impossible in
+this stack — Ed25519/X25519 exist in current browsers' Web Crypto, and P-256 ECDH + AES-256-GCM
+(already proven here) give equivalent guarantees without adding a library. The one piece that
+needed genuinely new infrastructure was server-side verification: this project has zero backend
+code today, everything runs through `using (true)` RLS, and Postgres can't verify a signature
+without an extension or an Edge Function. The decision was to skip that layer *and* the
+fine-grained capability/signature system it exists to enforce — without a verifier, "only some
+members can invite" is a UI suggestion, not a real boundary, since anyone holding the session's
+shared key can write a valid-looking access row regardless of what their own copy claims. Both are
+recorded as an explicit future feature rather than half-built now.
+
+**The core privacy property survives without any of that**, because it doesn't depend on a
+verifier — it depends on encryption plus one non-obvious lookup trick, both provable client-side:
+
+- **A public key is derivable from a private key's JWK alone.** An EC private key's JWK export
+  already contains `x`/`y` (the public half) alongside `d` (the private scalar) — so a personal
+  link only ever needs to carry the private key. No session id, no role, nothing else, and the
+  earlier per-chat `role: 'starter' | 'joiner'` param in the URL disappears entirely.
+- **The lookup key for "which sessions does this identity have" can't be the identity's real
+  public key**, because that's already public (needed for "start a session targeted at this
+  key"), and using it as a search column would let anyone who knows it run exactly that query.
+  `deriveLookupTag(privateKey, purpose)` — SHA-256 of the private scalar plus a purpose string —
+  is stable (same identity always re-derives the same tag) but requires the private key to
+  compute, so the public key alone gives no way to search for it. No new primitive, just a hash,
+  and it's what actually closes the correlation gap the capability-doc's `session_access` design
+  was reaching for.
+
+Both were verified end-to-end with a standalone script before being wired into the app: seal/open
+round-trips, a derived public key working for real ECDH, the lookup tag being stable per identity
+but different per purpose and per identity, and — the actual security property — a third party who
+finds someone else's `session_access` row still cannot open it, and cannot compute their own way to
+someone else's tag from a public key alone.
+
+**One shared session key, not a key per pair, replaces the old "ECDH result is the message key"
+scheme.** Whoever creates a session generates one random AES-256 key; every participant gets a
+sealed copy specific to their own public key (`sealForRecipient`/`openSealed` — the same ECIES
+pattern the design doc described, minus the parts that needed a verifier). This is also what
+removed the old "waiting for the other person to join" state entirely: since the key isn't derived
+from a second person's public key, the creator has full access to their own session — and can start
+typing — the instant it's created.
+
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)
+
+### v0.4.0 — 2026-08-27 (Stage A of the session-model rebuild)
+- **Rebuilt:** the entire chat data model and crypto layer around a hidden membership graph and a
+  shared per-session key — see "Rebuilding the Chat Model for a Hidden Membership Graph" above and
+  §3 in `docs/system-design.md` for the full design
+- **Renamed:** chat → session throughout — routes (`#/session/...`, `#/join/...`), components
+  (`SessionHome.vue`, `JoinSession.vue`, `SessionView.vue`), tables (`session_access`,
+  `session_participants`, `join_access`)
+- **Removed:** the old two-party-only `sessions.starter_public_key`/`joiner_public_key` shape, the
+  "waiting for the other person to join" state, and the `role: starter|joiner` URL parameter
+- **Added:** guest display names (`randomGuestName`), an Invite/Warning control pair on the session
+  view replacing the old two-link intermediate screen
+- **Deferred (tracked in `docs/TODO.md`):** accounts, guest→account migration, multi-participant
+  invites with an accept/view-only flow, server-side capability verification
 
 ### v0.2.1 — 2026-08-23
 - **Fixed:** The message composer's Enter key sent on every platform, including mobile, where

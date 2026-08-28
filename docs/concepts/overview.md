@@ -18,10 +18,13 @@ From inside the session:
 
 ## Joining a session
 
-Open the invite link you were sent and tap **Join session**. If you're not signed in, this
-generates your own keypair and adds you to the conversation — you'll land in the same thread, with
-your own personal link available the same way. If you're signed in to an account, it's added
-straight to your chat list instead — no link to save.
+Open the invite link you were sent. If you're already signed in to an account, you'll see **Join as
+&lt;your username&gt;** — tap it and the session is added straight to your chat list, no link to
+save. If you're not signed in, you get a choice:
+- **Join as guest** generates a fresh keypair in this browser and adds you to the conversation —
+  you'll land in the same thread, with your own personal link available the same way.
+- **Join as existing user** lets you paste your account link on the spot to sign in, then joins
+  with that account — handy when you're on a device you haven't logged into yet.
 
 ## Accounts
 

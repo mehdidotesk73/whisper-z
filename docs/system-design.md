@@ -226,6 +226,14 @@ already matches, and if it finds one, returns that session id directly instead o
 — the caller just navigates there, same as a normal join. A guest never runs this check (there's
 nothing to find), so this only ever short-circuits an account.
 
+**An invite link offers all three ways to redeem it, decided in the UI, not the data.** `JoinSession.vue`
+shows `Join as <username>` when `currentAccount` is already set, `Join as guest` /
+`Join as existing user` otherwise — "existing user" just calls `loginWithPackedKey` on a pasted
+account link and then calls the same `join()` used everywhere else. Nothing about the join link or
+the join payload encodes which path was taken; it's purely which identity happens to be active in
+the browser when "Join" is actually clicked. This is the same "one session system, different ways
+to access it" principle the whole account/guest split is built on.
+
 **Why a personal link isn't enough once an account exists: the `mysession` route.** A bare private
 key resolves to "whichever `session_access` row that tag has" — fine when there's exactly one, which
 is true for every guest identity by construction (a fresh keypair per session). An account's tag can
@@ -300,7 +308,8 @@ src/components/
   SessionHome.vue     logged-out home: "Start a session" + paste-a-link box + "Create an account"
   AccountHome.vue     logged-in home: chat list (src/api/sessionList.ts) + "Start a session"
   CreateAccount.vue   generate an account keypair + username, reveal its one-time account link
-  JoinSession.vue     redeem an invite link — account-aware via sessionActions.ts
+  JoinSession.vue     redeem an invite link as the logged-in account, a guest, or by logging in
+                      on the spot (pasting an account link) — all via sessionActions.ts
   SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId
 ```
 

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import HelpModal from './components/HelpModal.vue'
-import ChatHome from './components/ChatHome.vue'
-import JoinChat from './components/JoinChat.vue'
-import ChatView from './components/ChatView.vue'
+import SessionHome from './components/SessionHome.vue'
+import JoinSession from './components/JoinSession.vue'
+import SessionView from './components/SessionView.vue'
 import { debugState, logDebug, logAsText } from './debug'
 import { reloadLatest } from './pwa'
 import { route } from './lib/route'
@@ -105,15 +105,9 @@ onMounted(() => {
     </header>
 
     <div class="content">
-      <ChatHome v-if="route.name === 'home'" />
-      <JoinChat v-else-if="route.name === 'join'" :session-id="route.sessionId" />
-      <ChatView
-        v-else-if="route.name === 'chat'"
-        :key="`${route.sessionId}:${route.role}`"
-        :session-id="route.sessionId"
-        :role="route.role"
-        :packed-key="route.packedKey"
-      />
+      <SessionHome v-if="route.name === 'home'" />
+      <JoinSession v-else-if="route.name === 'join'" :join-id="route.joinId" :secret="route.secret" />
+      <SessionView v-else-if="route.name === 'session'" :key="route.packedKey" :packed-key="route.packedKey" />
     </div>
 
     <footer class="debug">

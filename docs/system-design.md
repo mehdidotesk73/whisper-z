@@ -9,14 +9,16 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 - **Header/footer shell** — app title, Help modal, build/version info, reload affordance, debug panel
 - **Service-worker caching** — offline capability, smart update detection
 - **Mobile-first UX** — responsive, touch-optimized, no hover-only interactions
-- **Three screens** (`src/components/ChatHome.vue`, `JoinChat.vue`, `ChatView.vue`), switched by a
-  hash-based router (`src/lib/route.ts`) — no `vue-router`, just enough parsing for three states
-- **Pure computation layer** (`src/lib/`) — key agreement, encrypt/decrypt, routing, clipboard
-- **Data layer** (`src/api/`) — the Supabase client and session/message reads, writes, and realtime
-  subscriptions
+- **Three screens** (`src/components/SessionHome.vue`, `JoinSession.vue`, `SessionView.vue`),
+  switched by a hash-based router (`src/lib/route.ts`) — no `vue-router`, just enough parsing for
+  three link shapes
+- **Pure computation layer** (`src/lib/`) — key agreement, sealed envelopes, encrypt/decrypt,
+  routing, clipboard
+- **Data layer** (`src/api/`) — the Supabase client and opaque-record reads/writes/realtime
+  subscriptions (the database never sees plaintext identity or membership relationships — see §3)
 - **Hot reload in dev** — instant feedback on code changes
 - **Netlify** — production site and a live preview on every branch/PR, one host
-- **Supabase** — shared Postgres database so two browsers can sync a conversation; see §3a
+- **Supabase** — stores only encrypted, opaque records; see §3 for the full model
 
 ### Architecture Diagram
 
@@ -32,26 +34,31 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 │  │  ├─ DebugPanel                    │  │
 │  │  ├─ UpdateAvailablePrompt         │  │
 │  │  └─ route.ts picks one of:        │  │
-│  │      ChatHome │ JoinChat │ ChatView│ │
+│  │   SessionHome│JoinSession│SessionView│
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
 │  │  lib/ (pure functions)            │  │
-│  │  ├─ crypto.ts (ECDH + AES-GCM)    │  │
+│  │  ├─ crypto.ts (ECDH + AES-GCM,    │  │
+│  │  │   sealed envelopes, lookup     │  │
+│  │  │   tags — see §3)               │  │
 │  │  ├─ route.ts (hash router)        │  │
+│  │  ├─ guestName.ts                  │  │
 │  │  └─ clipboard.ts                  │  │
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
 │  │  api/ (Supabase data access)      │  │
 │  │  ├─ supabase.ts (client)          │  │
-│  │  └─ session.ts (reads/writes/     │  │
-│  │      realtime subscriptions)      │  │
+│  │  └─ sessions.ts (opaque reads/    │  │
+│  │      writes/realtime — the client │  │
+│  │      decrypts, the API doesn't)   │  │
 │  └───────────────────────────────────┘  │
 └──────────────────┬──────────────────────┘
-                    │ ciphertext + public keys only
+                    │ nothing but ciphertext and
+                    │ purpose-derived lookup tags
                     ▼
 ┌─────────────────────────────────────────┐
 │   Supabase (Postgres + Realtime)        │
-│   sessions, messages — see §3a          │
+│   opaque tables only — see §3           │
 └─────────────────────────────────────────┘
 ```
 
@@ -78,55 +85,109 @@ This is the shell that wraps every page/tab. It provides version checking, updat
 
 Uses CSS custom properties (`--bg-elev`, `--text`, `--border`, etc.) for theming. Dark/light mode via `prefers-color-scheme` media query. Mobile-safe padding with `safe-area-inset` for notch/bottom-bar devices.
 
-## §3 — Data Layer (api/)
+## §3 — Session Data Model & Trust Model
 
-Where to put external data fetches. Example structure:
-
-```
-src/api/
-  example.ts       fetch & cache logic
-```
-
-Keep fetches synchronous from the component's perspective using a composable (below) that caches results.
-
-## §3a — Chat Data Model & Trust Model
-
-Two tables in Supabase, link-only sharing (a session's `id` is its own access key — see the
-honest-version-of-"anyone with the link" caveat in `docs/experience.md`):
+**Design principle:** the database stores only opaque, encrypted records. It never holds a
+plaintext relationship saying which identity belongs to which session — only ciphertext, and a
+lookup value derived from a private key that the database itself cannot invert. See
+`docs/experience.md` for the full design rationale and what was considered and rejected along the
+way (a capability-signature/permission system, a dedicated verification server) — those are future
+work, not part of this model.
 
 ```sql
-sessions (id uuid pk, starter_public_key text, joiner_public_key text nullable, created_at)
-messages (id uuid pk, session_id fk → sessions, sender 'starter'|'joiner', ciphertext text, iv text, created_at)
+sessions (id uuid pk, created_at)                          -- an opaque container, nothing else
+
+session_access (                                            -- "who can find this session, with what key"
+  id uuid pk, owner_pub text, ciphertext text, iv text,
+  ephemeral_public_key text, created_at
+)
+
+join_access (                                                -- a redeemable invite link
+  id uuid pk, ciphertext text, iv text, created_at
+)
+
+session_participants (                                       -- who's in a session (plaintext — see below)
+  id uuid pk, session_id fk → sessions, public_key text,
+  display_name text nullable, created_at
+)
+
+messages (
+  id uuid pk, session_id fk → sessions, ciphertext text, iv text, created_at
+)
 ```
 
-**Key agreement:** each side generates an ECDH (P-256) keypair locally (`src/lib/crypto.ts`,
-`generateKeyPair`). Only the public half is ever written to `sessions`. Starting a chat writes
-`starter_public_key`; joining writes `joiner_public_key` (guarded by
-`.is('joiner_public_key', null)` so a second visitor to the same invite link can't overwrite the
-real joiner). Once both public keys exist, each side derives the identical AES-GCM key from *their
-own private key + the other side's public key* (`deriveSharedKey`) — the shared secret itself is
-never transmitted or stored.
+**One shared key per session, not a key per pair.** Whoever starts a session generates a single
+random AES-256 key (`generateSessionKey`) — never derived from anyone's identity keypair. Every
+message in that session is encrypted with it. This is what makes adding participants later (a
+planned feature) require no re-encryption of history: a new participant just needs their own sealed
+copy of the same key, not a whole new scheme.
 
-**Where the private key lives:** nowhere but the URL. `ChatHome`/`JoinChat` export the freshly
-generated private key as a JWK, pack it into a URL-safe string (`jwkToUrlSafe`), and put it in the
-fragment of that participant's **personal link** (`#/chat/<sessionId>/<role>/<packedKey>`). A
-fragment never leaves the browser (not sent to any server, including Netlify), so the only way to
-recover a chat is to still have that link. Losing it is unrecoverable by design — see
-`docs/concepts/overview.md`.
+**Sealed envelopes (ECIES), the one encryption pattern reused everywhere.** `sealForRecipient`
+generates a one-time keypair, does ECDH between its private half and the recipient's public key,
+and uses the resulting shared secret to AES-GCM-encrypt the payload — storing the ciphertext, iv,
+and the one-time keypair's *public* half (its private half is discarded immediately). `openSealed`
+reverses it: ECDH between the recipient's real private key and that stored ephemeral public key
+recovers the same shared secret. Every encrypted table in this schema — `session_access` now,
+`private_account_state` later — uses this same pair of functions in `src/lib/crypto.ts`. Nothing
+here is a new algorithm, just ECDH + AES-GCM applied to a one-time keypair instead of a long-term
+identity.
 
-**Message flow:** `ChatView` fetches existing `messages` rows and decrypts each with the derived
-key, then subscribes to `postgres_changes` INSERTs on `messages` (filtered to the session) for new
-ones — including its own sends, which round-trip back through the same subscription rather than
-being rendered optimistically. It also subscribes to UPDATEs on `sessions` while waiting, so the
-"waiting for the other person to join" screen resolves the moment the other side's public key
-appears, without a page reload.
+**Why `session_access.owner_pub` isn't a real public key.** A participant's actual public key is
+already public information (`session_participants.public_key`, or an account's directory entry in
+a later stage) — using it directly as the lookup column for "which sessions does this identity
+have" would let anyone who already knows that public key run exactly that query and reconstruct the
+membership graph. Instead, `owner_pub` is `deriveLookupTag(privateKey, 'session-access')`: a
+SHA-256 digest of the private key's scalar plus a purpose string. It's stable (the same identity
+always re-derives the same tag, so one query finds every session_access row it owns), but
+computable *only* by whoever holds the private key — the public key alone gives no way to compute
+it. This closes the correlation gap with nothing more exotic than a hash.
 
-**What the server can and can't see:** `ciphertext`/`iv` are opaque to anyone reading the database
-directly — same protection described in "End-to-End Encryption Over a Database You Don't Trust" in
-`docs/experience.md`. Metadata (that a session exists, roughly when messages were sent, message
-count) is not hidden. There's no out-of-band key verification (no "safety numbers"), so a
-compromised or MITM'd first exchange isn't caught — acceptable for this app's scope, called out
-honestly in the Help doc rather than oversold.
+**A personal link needs only a private key.** An EC private key's JWK export already contains its
+public half (`x`, `y`) alongside the private scalar (`d`) — `publicJwkFromPrivateJwk` just strips
+`d`. So a personal link (`#/session/<packedKey>`) carries nothing but the private key: the client
+derives the public key, the lookup tag, queries `session_access` for that tag, and decrypts
+whichever row comes back to learn the session id and the shared key. No session id, no role, no
+separate identifier needed in the URL at all.
+
+**Join links are a symmetric bearer secret, not tied to any identity.** Starting or reopening a
+session's Invite panel generates 32 random bytes (`generateJoinSecret`) used directly as a raw
+AES-256 key — no key agreement, since there's no recipient identity yet to agree with. The
+`join_access` row's ciphertext (session id + session key) is encrypted with those bytes; the link
+(`#/join/<joinId>/<secret>`) carries a plain lookup id (safe — it's not secret on its own) and the
+secret in the fragment. Anyone who has the link can decrypt the row and become a participant;
+`joinId` is never treated as sensitive, `secret` never leaves the browser except inside that one
+fragment.
+
+**`session_participants` is deliberately plaintext, and that's fine.** It holds who's in a
+*specific, already-known* session — every legitimate participant already sees this by definition of
+being in the conversation, so hiding it from them buys nothing. What must stay hidden is the
+different fact of *which sessions a given identity belongs to across the whole table*, which is
+exactly what the `session_access` lookup-tag design above protects. `display_name` is set for a
+guest (a random name, `randomGuestName()`) and left `null` for an account holder once accounts
+exist, whose current username is meant to be resolved live instead of frozen at join time.
+
+**Messages carry their sender inside the ciphertext, not a column.** A decrypted message is
+`{ sender: <public key JSON>, text, createdAt }` (`src/lib/sessionTypes.ts`). `SessionView` decrypts
+each row with the session key, matches `sender` against its own public key for "mine" styling, and
+looks up everyone else's current name via the in-memory `session_participants` map kept live by a
+realtime subscription — so a message's displayed sender name can update if that mapping changes
+later (relevant once guest→account migration lands), without rewriting the message itself.
+
+**No "waiting for the other side" state anymore.** Because the session key isn't derived from a
+second person's public key, the creator has full read/write access to their own session the instant
+they create it — `SessionView` opens straight into the thread, with an **Invite** control that
+reveals a join link on demand and a **Warning** control (shown whenever the current identity has no
+account to fall back on) explaining that closing the tab without saving the personal link means
+permanent loss of access.
+
+**What the server can and can't see:** ciphertext is opaque, exactly as before. What's new here is
+that the *membership graph itself* — which sessions a given identity/account touches — is opaque
+too, not just message content. Metadata that remains visible: that a session exists, roughly when
+messages were sent, how many `session_access` rows a given lookup tag has (existence/count, not
+which sessions). There's still no out-of-band key verification and no forward secrecy — same
+honest caveats as before, now joined by "an active database attacker with write access could still
+tamper with a row in ways an honest client would reject, but nothing here stops that at the server;
+see `docs/experience.md` for why that's deliberately out of scope for now."
 
 ## §4 — Shared Logic (lib/)
 
@@ -164,10 +225,10 @@ Organized by feature. Keep them thin — mostly templating, logic lives in `lib/
 
 ```
 src/components/
-  HelpModal.vue      renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
-  ChatHome.vue        "Start a chat" + the created session's personal/invite links
-  JoinChat.vue        "Join chat" via an invite link + the joiner's own personal link
-  ChatView.vue        waiting state, decrypted thread, composer
+  HelpModal.vue       renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
+  SessionHome.vue     "Start a session" + paste-a-link box
+  JoinSession.vue     redeem an invite link, generating a fresh identity
+  SessionView.vue     the thread — opens immediately, Invite/Warning controls, composer
 ```
 
 ## §7 — Build, Deploy & Conventions

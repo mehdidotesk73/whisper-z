@@ -28,7 +28,7 @@ import {
 } from '../api/sessions'
 import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
-import { navigate, homeHash, joinHash, parseHash, extractHash } from '../lib/route'
+import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
 import { alreadyHasAccess, migrateGuestSessionToAccount } from '../api/sessionActions'
@@ -306,6 +306,10 @@ async function migrateToAccount() {
     }
     migrated.value = true
     showMigrate.value = false
+    // Navigate to the account-backed view as the confirmation that this
+    // worked — otherwise nothing visibly changes and it looks like the
+    // click did nothing but log someone in.
+    navigate(mySessionHash(activeSessionId))
   } catch (err) {
     logDebug(`migrateToAccount failed: ${err}`, 'error')
     migrateError.value = 'Could not add this session to your account — try again.'

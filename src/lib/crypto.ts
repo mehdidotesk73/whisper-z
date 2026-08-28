@@ -1,13 +1,14 @@
-// Key agreement (ECDH) + symmetric encryption (AES-GCM) for the chat.
+// Cryptographic primitives for the capability-based session model.
 //
-// Each participant has a keypair generated locally. Combining your private
-// key with the other side's public key produces the same shared secret as
-// they get combining theirs with yours — that shared secret becomes the
-// AES-GCM key. Private keys never leave this module's caller; only public
-// keys and ciphertext are ever handed to the database. See "End-to-End
-// Encryption Over a Database You Don't Trust" in docs/experience.md.
+// Everything here builds on two native Web Crypto primitives — ECDH (P-256)
+// for key agreement and AES-GCM for authenticated encryption — reused for
+// every purpose in the app: message content, sealed per-identity envelopes,
+// and session-key wrapping. No custom elliptic-curve math, no hand-rolled
+// AEAD. See docs/system-design.md §3 for how these compose into the session
+// model, and docs/experience.md for the design rationale.
 
 const ECDH_PARAMS: EcKeyImportParams | EcKeyGenParams = { name: 'ECDH', namedCurve: 'P-256' }
+const AES_PARAMS = { name: 'AES-GCM', length: 256 }
 
 export async function generateKeyPair(): Promise<CryptoKeyPair> {
   return crypto.subtle.generateKey(ECDH_PARAMS, true, ['deriveKey']) as Promise<CryptoKeyPair>
@@ -29,14 +30,17 @@ export async function importPrivateKey(jwk: JsonWebKey): Promise<CryptoKey> {
   return crypto.subtle.importKey('jwk', jwk, ECDH_PARAMS, true, ['deriveKey'])
 }
 
+/** An EC private key's JWK already contains its public half (x, y) — no separate export needed. */
+export function publicJwkFromPrivateJwk(jwk: JsonWebKey): JsonWebKey {
+  const { kty, crv, x, y } = jwk
+  return { kty, crv, x, y, ext: true, key_ops: [] }
+}
+
 export async function deriveSharedKey(privateKey: CryptoKey, publicKey: CryptoKey): Promise<CryptoKey> {
-  return crypto.subtle.deriveKey(
-    { name: 'ECDH', public: publicKey },
-    privateKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt'],
-  )
+  return crypto.subtle.deriveKey({ name: 'ECDH', public: publicKey }, privateKey, AES_PARAMS, false, [
+    'encrypt',
+    'decrypt',
+  ])
 }
 
 export interface EncryptedPayload {
@@ -58,6 +62,90 @@ export async function decryptText(key: CryptoKey, payload: EncryptedPayload): Pr
   return new TextDecoder().decode(plain)
 }
 
+// --- Session content key ---------------------------------------------------
+// One random AES-256 key per session, generated once by whoever creates it.
+// Every participant gets their own sealed copy (see sealForRecipient below);
+// the key itself is never derived from anyone's identity, so adding a
+// participant later never requires re-encrypting history.
+
+export async function generateSessionKey(): Promise<CryptoKey> {
+  return crypto.subtle.generateKey(AES_PARAMS, true, ['encrypt', 'decrypt'])
+}
+
+export async function exportSessionKey(key: CryptoKey): Promise<JsonWebKey> {
+  return crypto.subtle.exportKey('jwk', key)
+}
+
+export async function importSessionKey(jwk: JsonWebKey): Promise<CryptoKey> {
+  return crypto.subtle.importKey('jwk', jwk, { name: 'AES-GCM' }, true, ['encrypt', 'decrypt'])
+}
+
+// --- Sealed envelopes (ECIES) ------------------------------------------------
+// "Seal this payload so only the holder of recipientPrivateKey can open it."
+// A fresh, one-time keypair stands in for the sealer's identity — the
+// sealer doesn't need a long-term keypair of their own, and the ephemeral
+// private half is discarded immediately after use. This is the one
+// operation every encrypted table in the schema is built from: session
+// access rows, private identity state, anything sealed to a single owner.
+
+export interface SealedEnvelope {
+  ciphertext: string
+  iv: string
+  ephemeralPublicKey: string // packed JWK
+}
+
+export async function sealForRecipient(payload: unknown, recipientPublicKey: CryptoKey): Promise<SealedEnvelope> {
+  const ephemeral = await generateKeyPair()
+  const sharedKey = await deriveSharedKey(ephemeral.privateKey, recipientPublicKey)
+  const { ciphertext, iv } = await encryptText(sharedKey, JSON.stringify(payload))
+  const ephemeralPublicKey = packJwk(await exportPublicKey(ephemeral.publicKey))
+  return { ciphertext, iv, ephemeralPublicKey }
+}
+
+export async function openSealed<T>(envelope: SealedEnvelope, recipientPrivateKey: CryptoKey): Promise<T> {
+  const ephemeralPublicKey = await importPublicKey(unpackJwk(envelope.ephemeralPublicKey))
+  const sharedKey = await deriveSharedKey(recipientPrivateKey, ephemeralPublicKey)
+  const json = await decryptText(sharedKey, { ciphertext: envelope.ciphertext, iv: envelope.iv })
+  return JSON.parse(json) as T
+}
+
+// --- Join secrets ------------------------------------------------------------
+// A join link's secret is 32 random bytes used directly as a raw AES-256 key
+// — both the creator (encrypting) and anyone who follows the link
+// (decrypting) derive nothing, they just import the same bytes. The secret
+// lives only in the URL fragment; the database never sees it, only the
+// ciphertext it produces.
+
+export function generateJoinSecret(): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(32))
+}
+
+export async function importJoinKey(bytes: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey('raw', bytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'])
+}
+
+// --- Private lookup tags -----------------------------------------------------
+// session_access and private_account_state are looked up by owner, but the
+// lookup value can't be the identity's real public key — that's already
+// public (it's how someone starts a session targeted at you), so using it
+// as a search key would let anyone reconstruct "which sessions does this
+// account have" from the outside. Instead, derive a purpose-scoped tag from
+// the PRIVATE key: computable only by whoever holds it, stable across every
+// session so one query finds them all, and useless to anyone who only has
+// the public key.
+
+export async function deriveLookupTag(privateKey: CryptoKey, purpose: string): Promise<string> {
+  const jwk = await exportPrivateKey(privateKey)
+  const scalar = base64ToBuf(urlSafeBase64ToStandard(jwk.d!))
+  const input = new Uint8Array(scalar.byteLength + purpose.length)
+  input.set(new Uint8Array(scalar), 0)
+  input.set(new TextEncoder().encode(purpose), scalar.byteLength)
+  const digest = await crypto.subtle.digest('SHA-256', input)
+  return bufToBase64(digest)
+}
+
+// --- Encoding helpers ---------------------------------------------------------
+
 function bufToBase64(buf: ArrayBuffer): string {
   let binary = ''
   for (const byte of new Uint8Array(buf)) binary += String.fromCharCode(byte)
@@ -71,13 +159,30 @@ function base64ToBuf(b64: string): ArrayBuffer {
   return bytes.buffer
 }
 
-/** Pack a JWK into a URL-safe string, for embedding a private key in a link fragment. */
-export function jwkToUrlSafe(jwk: JsonWebKey): string {
+function urlSafeBase64ToStandard(s: string): string {
+  let b64 = s.replace(/-/g, '+').replace(/_/g, '/')
+  while (b64.length % 4) b64 += '='
+  return b64
+}
+
+/** Packs any JSON-serializable value into a URL-safe string, for a link fragment. */
+export function packJwk(jwk: JsonWebKey): string {
   return btoa(JSON.stringify(jwk)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
-export function urlSafeToJwk(packed: string): JsonWebKey {
-  let b64 = packed.replace(/-/g, '+').replace(/_/g, '/')
-  while (b64.length % 4) b64 += '='
-  return JSON.parse(atob(b64))
+export function unpackJwk(packed: string): JsonWebKey {
+  return JSON.parse(atob(urlSafeBase64ToStandard(packed)))
+}
+
+export function bytesToUrlSafe(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+export function urlSafeToBytes(packed: string): Uint8Array {
+  const binary = atob(urlSafeBase64ToStandard(packed))
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
 }

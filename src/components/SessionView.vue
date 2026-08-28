@@ -201,18 +201,23 @@ const showInvite = ref(false)
 const inviteLink = ref('')
 const copiedInvite = ref(false)
 
+async function generateInvite() {
+  if (!sessionKeyJwk) return
+  copiedInvite.value = false
+  inviteLink.value = ''
+  const secretBytes = generateJoinSecret()
+  const joinKey = await importJoinKey(secretBytes)
+  const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+  const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
+  const joinId = await createJoinAccess({ ciphertext, iv })
+  if (!joinId) return
+  inviteLink.value = `${location.origin}${location.pathname}${joinHash(joinId, bytesToUrlSafe(secretBytes))}`
+}
+
 async function toggleInvite() {
   showWarning.value = false
   showInvite.value = !showInvite.value
-  if (showInvite.value && !inviteLink.value && sessionKeyJwk) {
-    const secretBytes = generateJoinSecret()
-    const joinKey = await importJoinKey(secretBytes)
-    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
-    const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
-    const joinId = await createJoinAccess({ ciphertext, iv })
-    if (!joinId) return
-    inviteLink.value = `${location.origin}${location.pathname}${joinHash(joinId, bytesToUrlSafe(secretBytes))}`
-  }
+  if (showInvite.value && !inviteLink.value) await generateInvite()
 }
 
 async function copyInvite() {
@@ -265,7 +270,7 @@ function goHome() {
     <div ref="panelArea">
       <div v-if="showInvite" class="link-block">
         <label>Invite link</label>
-        <p class="hint">Send this to someone so they can join.</p>
+        <p class="hint">Send this to someone so they can join. It works once — generate a new one for the next person.</p>
         <div class="link-row">
           <input
             readonly
@@ -274,6 +279,7 @@ function goHome() {
           />
           <button :disabled="!inviteLink" @click="copyInvite">{{ copiedInvite ? 'Copied ✓' : 'Copy' }}</button>
         </div>
+        <button class="new-link" :disabled="!inviteLink" @click="generateInvite">New link, for another person</button>
       </div>
 
       <div v-if="showWarning" class="link-block warning-block">
@@ -413,6 +419,21 @@ function goHome() {
   background: var(--bg-elev-2);
   color: var(--text);
   white-space: nowrap;
+}
+
+.new-link {
+  align-self: flex-start;
+  padding: 0.3rem 0;
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  font-size: 0.8rem;
+  text-decoration: underline;
+}
+
+.new-link:disabled {
+  opacity: 0.6;
+  text-decoration: none;
 }
 
 .thread {

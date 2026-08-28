@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { importJoinKey, decryptText, urlSafeToBytes } from '../lib/crypto'
-import { fetchJoinAccess } from '../api/sessions'
+import { fetchJoinAccess, deleteJoinAccess } from '../api/sessions'
 import { joinExistingSession } from '../api/sessionActions'
 import { currentAccount } from '../lib/auth'
 import { sessionHash, mySessionHash, navigate } from '../lib/route'
@@ -43,6 +43,9 @@ async function join() {
       status.value = 'failed'
       return
     }
+    // Best-effort: the join already succeeded, so a failure here just leaves
+    // the link redeemable again rather than blocking navigation.
+    await deleteJoinAccess(props.joinId)
     navigate(started.packedKey ? sessionHash(started.packedKey) : mySessionHash(started.sessionId))
   } catch (err) {
     logDebug(`join failed: ${err}`, 'error')

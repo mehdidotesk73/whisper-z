@@ -169,14 +169,18 @@ derives the public key, the lookup tag, queries `session_access` for that tag, a
 whichever row comes back to learn the session id and the shared key. No session id, no role, no
 separate identifier needed in the URL at all.
 
-**Join links are a symmetric bearer secret, not tied to any identity.** Starting or reopening a
-session's Invite panel generates 32 random bytes (`generateJoinSecret`) used directly as a raw
-AES-256 key — no key agreement, since there's no recipient identity yet to agree with. The
-`join_access` row's ciphertext (session id + session key) is encrypted with those bytes; the link
-(`#/join/<joinId>/<secret>`) carries a plain lookup id (safe — it's not secret on its own) and the
-secret in the fragment. Anyone who has the link can decrypt the row and become a participant;
-`joinId` is never treated as sensitive, `secret` never leaves the browser except inside that one
-fragment.
+**Join links are a symmetric bearer secret, not tied to any identity — and single-use.** Tapping
+Invite generates 32 random bytes (`generateJoinSecret`) used directly as a raw AES-256 key — no key
+agreement, since there's no recipient identity yet to agree with. The `join_access` row's ciphertext
+(session id + session key) is encrypted with those bytes; the link (`#/join/<joinId>/<secret>`)
+carries a plain lookup id (safe — it's not secret on its own) and the secret in the fragment.
+`JoinSession.vue` deletes the `join_access` row (`deleteJoinAccess`) right after a successful join,
+so the same link can't be redeemed twice — inviting a second person means generating a second link
+(the Invite panel's "New link, for another person"). This is a best-effort guarantee, not an atomic
+one: two people completing the join flow from the same link at the same instant can both still
+succeed, since neither re-checks the row before finishing. Any participant, not just the session's
+owner, can currently mint an invite link — restricting that to the owner is one of the still-open
+gaps tracked in `docs/TODO.md`, alongside real (server-verified) role enforcement.
 
 **`session_participants` is deliberately plaintext, and that's fine.** It holds who's in a
 *specific, already-known* session — every legitimate participant already sees this by definition of

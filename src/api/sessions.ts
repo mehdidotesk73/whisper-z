@@ -105,6 +105,17 @@ export async function fetchJoinAccess(joinId: string): Promise<JoinAccessRow | n
   return data as JoinAccessRow
 }
 
+/** Consumes a join link after a successful redemption, so it can't be used again. */
+export async function deleteJoinAccess(joinId: string): Promise<boolean> {
+  const { error } = await supabase.from('join_access').delete().eq('id', joinId)
+
+  if (error) {
+    logDebug(`deleteJoinAccess failed: ${error.message}`, 'error')
+    return false
+  }
+  return true
+}
+
 // --- session_participants: the shared, plaintext "who's in this session" --
 // Fine to be plaintext: within a session everyone already knows who else is
 // in it. `display_name` is set for guests (a random name); left null for an

@@ -10,7 +10,8 @@ spot — nothing is typed in, nothing sent anywhere except what's needed to invi
 session opens immediately: you can start typing right away, even before anyone else has joined.
 
 From inside the session:
-- **Invite** reveals a link you can send to someone so they can join.
+- **Invite** reveals a link you can send to someone so they can join. It works once — tap
+  **New link, for another person** to invite someone else.
 - **⚠ Warning** reveals your **personal link** — save it (bookmark it, message it to yourself) so
   you can reopen this exact session later on this device. Closing the tab without saving it means
   losing access for good; there's no password and no recovery.

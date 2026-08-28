@@ -1,12 +1,28 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import HelpModal from './components/HelpModal.vue'
 import SessionHome from './components/SessionHome.vue'
+import AccountHome from './components/AccountHome.vue'
 import JoinSession from './components/JoinSession.vue'
 import SessionView from './components/SessionView.vue'
 import { debugState, logDebug, logAsText } from './debug'
 import { reloadLatest } from './pwa'
-import { route } from './lib/route'
+import { route, homeHash, navigateReplace } from './lib/route'
+import { currentAccount, tryAutoLogin, loginWithPackedKey } from './lib/auth'
+
+onMounted(tryAutoLogin)
+
+// An `#/account/<packedKey>` link logs in, then drops the key from the URL —
+// same one-time-consumption pattern as an invite link.
+watch(
+  route,
+  async (r) => {
+    if (r.name !== 'account') return
+    await loginWithPackedKey(r.packedKey)
+    navigateReplace(homeHash)
+  },
+  { immediate: true },
+)
 
 const buildId = __BUILD_ID__
 const buildTime = __BUILD_TIME__
@@ -105,9 +121,12 @@ onMounted(() => {
     </header>
 
     <div class="content">
-      <SessionHome v-if="route.name === 'home'" />
+      <AccountHome v-if="route.name === 'home' && currentAccount" />
+      <SessionHome v-else-if="route.name === 'home'" />
       <JoinSession v-else-if="route.name === 'join'" :join-id="route.joinId" :secret="route.secret" />
       <SessionView v-else-if="route.name === 'session'" :key="route.packedKey" :packed-key="route.packedKey" />
+      <SessionView v-else-if="route.name === 'mysession'" :key="route.sessionId" :session-id="route.sessionId" />
+      <p v-else-if="route.name === 'account'" class="muted">Signing in…</p>
     </div>
 
     <footer class="debug">

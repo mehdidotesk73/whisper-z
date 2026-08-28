@@ -1,56 +1,26 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import {
-  generateKeyPair,
-  exportPublicKey,
-  exportPrivateKey,
-  generateSessionKey,
-  exportSessionKey,
-  sealForRecipient,
-  deriveLookupTag,
-  packJwk,
-  canonicalPublicKeyId,
-} from '../lib/crypto'
-import { createSession, insertSessionAccess, addParticipant } from '../api/sessions'
-import { randomGuestName } from '../lib/guestName'
+import { startNewSession } from '../api/sessionActions'
 import { sessionHash, navigate, parseHash, extractHash } from '../lib/route'
-import type { SessionAccessPayload } from '../lib/sessionTypes'
 import { logDebug } from '../debug'
+import CreateAccount from './CreateAccount.vue'
 
 const starting = ref(false)
 const failed = ref(false)
 const pastedLink = ref('')
 const pasteError = ref('')
+const showCreateAccount = ref(false)
 
 async function startSession() {
   starting.value = true
   failed.value = false
   try {
-    const sessionId = await createSession()
-    if (!sessionId) {
+    const started = await startNewSession(null)
+    if (!started || !started.packedKey) {
       failed.value = true
       return
     }
-
-    const identity = await generateKeyPair()
-    const sessionKey = await generateSessionKey()
-    const sessionKeyJwk = await exportSessionKey(sessionKey)
-
-    const payload: SessionAccessPayload = { sessionId, sessionKey: sessionKeyJwk, role: 'owner' }
-    const sealed = await sealForRecipient(payload, identity.publicKey)
-    const ownerPub = await deriveLookupTag(identity.privateKey, 'session-access')
-
-    const ok = await insertSessionAccess(ownerPub, sealed)
-    if (!ok) {
-      failed.value = true
-      return
-    }
-
-    const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
-    await addParticipant(sessionId, publicKeyId, randomGuestName())
-
-    const packedKey = packJwk(await exportPrivateKey(identity.privateKey))
-    navigate(sessionHash(packedKey))
+    navigate(sessionHash(started.packedKey))
   } catch (err) {
     logDebug(`startSession failed: ${err}`, 'error')
     failed.value = true
@@ -94,6 +64,13 @@ function goToPastedLink() {
       </div>
       <p v-if="pasteError" class="error">{{ pasteError }}</p>
     </div>
+
+    <div class="divider"><span>or</span></div>
+
+    <button v-if="!showCreateAccount" class="secondary" @click="showCreateAccount = true">
+      Create an account
+    </button>
+    <CreateAccount v-else @cancel="showCreateAccount = false" />
   </div>
 </template>
 
@@ -192,5 +169,15 @@ function goToPastedLink() {
   background: var(--bg-elev-2);
   color: var(--text);
   white-space: nowrap;
+}
+
+.secondary {
+  padding: 0.75rem 1rem;
+  min-height: 44px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--text);
+  font-weight: 600;
 }
 </style>

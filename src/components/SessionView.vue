@@ -29,10 +29,13 @@ import {
 import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash } from '../lib/route'
+import { currentAccount } from '../lib/auth'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
-const props = defineProps<{ packedKey: string }>()
+// Either a guest personal-link key, or an account's session id (looked up
+// against the account's own stable identity — see lib/auth.ts).
+const props = defineProps<{ packedKey?: string; sessionId?: string }>()
 
 type Status = 'loading' | 'ready' | 'not-found'
 const status = ref<Status>('loading')
@@ -50,7 +53,7 @@ const sending = ref(false)
 const scrollAnchor = ref<HTMLElement>()
 const composerTextarea = ref<HTMLTextAreaElement>()
 
-let sessionId = ''
+let activeSessionId = ''
 let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
 let ownPublicKeyId = ''
@@ -92,10 +95,22 @@ async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string
 
 onMounted(async () => {
   try {
-    const privateKeyJwk = unpackJwk(props.packedKey)
-    const privateKey = await importPrivateKey(privateKeyJwk)
-    const publicKeyJwk = publicJwkFromPrivateJwk(privateKeyJwk)
-    ownPublicKeyId = canonicalPublicKeyId(publicKeyJwk)
+    let privateKey: CryptoKey
+    if (props.sessionId) {
+      if (!currentAccount.value) {
+        status.value = 'not-found'
+        return
+      }
+      privateKey = currentAccount.value.privateKey
+      ownPublicKeyId = currentAccount.value.publicKeyId
+    } else if (props.packedKey) {
+      const privateKeyJwk = unpackJwk(props.packedKey)
+      privateKey = await importPrivateKey(privateKeyJwk)
+      ownPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
+    } else {
+      status.value = 'not-found'
+      return
+    }
 
     const ownerPub = await deriveLookupTag(privateKey, 'session-access')
     const rows = await fetchSessionAccessForOwner(ownerPub)
@@ -104,20 +119,36 @@ onMounted(async () => {
       return
     }
 
-    const access = await openSealed<SessionAccessPayload>(toEnvelope(rows[0]), privateKey)
-    sessionId = access.sessionId
+    let access: SessionAccessPayload | null = null
+    if (props.sessionId) {
+      // An account's tag can hold many sessions — find the one this route names.
+      for (const row of rows) {
+        const candidate = await openSealed<SessionAccessPayload>(toEnvelope(row), privateKey)
+        if (candidate.sessionId === props.sessionId) {
+          access = candidate
+          break
+        }
+      }
+    } else {
+      access = await openSealed<SessionAccessPayload>(toEnvelope(rows[0]), privateKey)
+    }
+    if (!access) {
+      status.value = 'not-found'
+      return
+    }
+    activeSessionId = access.sessionId
     sessionKeyJwk = access.sessionKey
     sessionKey = await importSessionKey(access.sessionKey)
 
-    const participants = await fetchParticipants(sessionId)
+    const participants = await fetchParticipants(activeSessionId)
     for (const p of participants) applyParticipant(p)
-    participantChannel = subscribeParticipants(sessionId, applyParticipant)
+    participantChannel = subscribeParticipants(activeSessionId, applyParticipant)
 
-    const existing = await fetchMessages(sessionId)
+    const existing = await fetchMessages(activeSessionId)
     for (const row of existing) await decodeAndAppend(row)
 
     status.value = 'ready'
-    messageChannel = subscribeMessages(sessionId, decodeAndAppend)
+    messageChannel = subscribeMessages(activeSessionId, decodeAndAppend)
   } catch (err) {
     logDebug(`Opening session failed: ${err}`, 'error')
     status.value = 'not-found'
@@ -137,7 +168,7 @@ async function send() {
   try {
     const payload: DecodedMessage = { sender: ownPublicKeyId, text, createdAt: new Date().toISOString() }
     const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(payload))
-    const ok = await sendMessage(sessionId, ciphertext, iv)
+    const ok = await sendMessage(activeSessionId, ciphertext, iv)
     if (ok) {
       draft.value = ''
       await nextTick()
@@ -176,7 +207,7 @@ async function toggleInvite() {
   if (showInvite.value && !inviteLink.value && sessionKeyJwk) {
     const secretBytes = generateJoinSecret()
     const joinKey = await importJoinKey(secretBytes)
-    const payload: JoinPayload = { sessionId, sessionKey: sessionKeyJwk }
+    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
     const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
     const joinId = await createJoinAccess({ ciphertext, iv })
     if (!joinId) return
@@ -191,9 +222,10 @@ async function copyInvite() {
   }
 }
 
-// Warning: always shown for now (no accounts yet — every session is guest-only).
+// Warning only applies to a guest (packedKey) route — an account-backed
+// (sessionId) route is recoverable via the account's own link instead.
 const showWarning = ref(false)
-const personalLink = `${location.origin}${location.pathname}#/session/${props.packedKey}`
+const personalLink = props.packedKey ? `${location.origin}${location.pathname}#/session/${props.packedKey}` : ''
 const copiedPersonal = ref(false)
 
 function toggleWarning() {
@@ -227,7 +259,7 @@ function goHome() {
     <div class="top-bar">
       <button class="chip" @click="goHome">← Home</button>
       <button v-if="status === 'ready'" class="chip" @click.stop="toggleInvite">Invite</button>
-      <button v-if="status === 'ready'" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
+      <button v-if="status === 'ready' && props.packedKey" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
     </div>
 
     <div ref="panelArea">

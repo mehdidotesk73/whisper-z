@@ -1,21 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import {
-  generateKeyPair,
-  exportPublicKey,
-  exportPrivateKey,
-  importJoinKey,
-  decryptText,
-  sealForRecipient,
-  deriveLookupTag,
-  packJwk,
-  urlSafeToBytes,
-  canonicalPublicKeyId,
-} from '../lib/crypto'
-import { fetchJoinAccess, insertSessionAccess, addParticipant } from '../api/sessions'
-import { randomGuestName } from '../lib/guestName'
-import { sessionHash, navigate } from '../lib/route'
-import type { JoinPayload, SessionAccessPayload } from '../lib/sessionTypes'
+import { importJoinKey, decryptText, urlSafeToBytes } from '../lib/crypto'
+import { fetchJoinAccess } from '../api/sessions'
+import { joinExistingSession } from '../api/sessionActions'
+import { currentAccount } from '../lib/auth'
+import { sessionHash, mySessionHash, navigate } from '../lib/route'
+import type { JoinPayload } from '../lib/sessionTypes'
 import { logDebug } from '../debug'
 
 const props = defineProps<{ joinId: string; secret: string }>()
@@ -48,27 +38,12 @@ async function join() {
   status.value = 'joining'
 
   try {
-    const identity = await generateKeyPair()
-
-    const payload: SessionAccessPayload = {
-      sessionId: joinPayload.sessionId,
-      sessionKey: joinPayload.sessionKey,
-      role: 'member',
-    }
-    const sealed = await sealForRecipient(payload, identity.publicKey)
-    const ownerPub = await deriveLookupTag(identity.privateKey, 'session-access')
-
-    const ok = await insertSessionAccess(ownerPub, sealed)
-    if (!ok) {
+    const started = await joinExistingSession(joinPayload, currentAccount.value)
+    if (!started) {
       status.value = 'failed'
       return
     }
-
-    const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
-    await addParticipant(joinPayload.sessionId, publicKeyId, randomGuestName())
-
-    const packedKey = packJwk(await exportPrivateKey(identity.privateKey))
-    navigate(sessionHash(packedKey))
+    navigate(started.packedKey ? sessionHash(started.packedKey) : mySessionHash(started.sessionId))
   } catch (err) {
     logDebug(`join failed: ${err}`, 'error')
     status.value = 'failed'
@@ -86,8 +61,9 @@ async function join() {
 
     <template v-else>
       <p class="intro">
-        You've been invited to an encrypted session. Joining generates your own keypair in this
-        browser — your private key never leaves it.
+        You've been invited to an encrypted session.
+        <template v-if="currentAccount">This will add it to {{ currentAccount.account.username }}'s chat list.</template>
+        <template v-else>Joining generates your own keypair in this browser — your private key never leaves it.</template>
       </p>
       <button class="primary" :disabled="status === 'joining'" @click="join">
         {{ status === 'joining' ? 'Joining…' : 'Join session' }}

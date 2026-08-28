@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   importPrivateKey,
   publicJwkFromPrivateJwk,
@@ -30,6 +30,7 @@ import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/s
 import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash } from '../lib/route'
 import { currentAccount } from '../lib/auth'
+import { fetchAccountByPublicKey } from '../api/accounts'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
@@ -43,7 +44,7 @@ const status = ref<Status>('loading')
 interface RenderedMessage {
   id: string
   mine: boolean
-  senderName: string
+  sender: string
   text: string
 }
 
@@ -57,7 +58,9 @@ let activeSessionId = ''
 let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
 let ownPublicKeyId = ''
-const participantNames = new Map<string, string>() // public key JSON -> display name
+// Reactive so the template re-renders once an account holder's username
+// resolves — see applyParticipant below.
+const participantNames = reactive(new Map<string, string>()) // public key id -> display name
 const seenMessageIds = new Set<string>()
 let messageChannel: RealtimeChannel | null = null
 let participantChannel: RealtimeChannel | null = null
@@ -66,8 +69,17 @@ function nameFor(publicKeyJson: string): string {
   return participantNames.get(publicKeyJson) ?? 'Someone'
 }
 
-function applyParticipant(row: ParticipantRow) {
-  participantNames.set(row.public_key, row.display_name ?? 'Someone')
+// A guest's display_name is set at join time and used as-is. An account
+// holder's is deliberately left null (system-design.md §3) so their current
+// username is resolved live instead of frozen at join time — that lookup
+// happens here.
+async function applyParticipant(row: ParticipantRow) {
+  if (row.display_name) {
+    participantNames.set(row.public_key, row.display_name)
+    return
+  }
+  const account = await fetchAccountByPublicKey(row.public_key)
+  participantNames.set(row.public_key, account?.username ?? 'Someone')
 }
 
 async function scrollToBottom() {
@@ -84,7 +96,7 @@ async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string
     messages.value.push({
       id: row.id,
       mine: plain.sender === ownPublicKeyId,
-      senderName: plain.sender === ownPublicKeyId ? 'You' : nameFor(plain.sender),
+      sender: plain.sender,
       text: plain.text,
     })
     scrollToBottom()
@@ -141,7 +153,7 @@ onMounted(async () => {
     sessionKey = await importSessionKey(access.sessionKey)
 
     const participants = await fetchParticipants(activeSessionId)
-    for (const p of participants) applyParticipant(p)
+    await Promise.all(participants.map(applyParticipant))
     participantChannel = subscribeParticipants(activeSessionId, applyParticipant)
 
     const existing = await fetchMessages(activeSessionId)
@@ -307,7 +319,7 @@ function goHome() {
       <ul class="thread">
         <li v-if="!messages.length" class="empty">No messages yet — say hello.</li>
         <li v-for="m in messages" :key="m.id" :class="['bubble', m.mine ? 'mine' : 'theirs']">
-          <span v-if="!m.mine" class="sender">{{ m.senderName }}</span>
+          <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
           {{ m.text }}
         </li>
         <li ref="scrollAnchor" class="anchor"></li>

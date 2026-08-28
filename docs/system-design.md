@@ -196,8 +196,12 @@ tracked in `docs/TODO.md`, alongside real (server-verified) role enforcement.
 being in the conversation, so hiding it from them buys nothing. What must stay hidden is the
 different fact of *which sessions a given identity belongs to across the whole table*, which is
 exactly what the `session_access` lookup-tag design above protects. `display_name` is set for a
-guest (a random name, `randomGuestName()`) and left `null` for an account holder once accounts
-exist, whose current username is meant to be resolved live instead of frozen at join time.
+guest (a random name, `randomGuestName()`) and left `null` for an account holder, whose current
+username is resolved live instead of frozen at join time — `SessionView.vue`'s `applyParticipant`
+calls `fetchAccountByPublicKey` for any row with a null `display_name`, and the participant-name map
+is a Vue `reactive()` Map (not a plain one) specifically so the thread re-renders once that lookup
+resolves, rather than a message's sender staying stuck on the "Someone" fallback it showed before
+the async lookup finished.
 
 **An account is just another identity — the same mechanism, a stable keypair.** Creating an account
 (`CreateAccount.vue`) generates a keypair exactly like a guest does, except the keypair is kept (a

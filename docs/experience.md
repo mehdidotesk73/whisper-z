@@ -136,6 +136,29 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   `SessionHome.vue`/`JoinSession.vue` (guest) and `AccountHome.vue` (account)
 - **Extended:** `SessionAccessPayload` gained an optional `title` field, stored in the same sealed
   envelope — no new table needed for a session's display name
+- **Added:** `Join as guest` / `Join as existing user` / `Join as <username>` choice on
+  `JoinSession.vue` — "existing user" logs in on the spot from a pasted account link
+  (`loginWithPackedKey`) and then joins with that account, so a device that's never logged in
+  doesn't have to bounce through the home screen first
+- **Fixed (found in live testing):** invite links were multi-use and never expired; redeeming one
+  deleted the row, which made a reused link indistinguishable from one that never existed and
+  crashed the read query. Replaced with `claimJoinAccess` — an atomic
+  `UPDATE ... WHERE consumed_at IS NULL ... RETURNING` (needs a new `join_access.consumed_at`
+  column) — plus a 10-minute TTL via `isJoinAccessExpired`, so a link is genuinely single-use, a
+  real "already used" vs. "expired" vs. "never existed" message shows correctly, and Postgres
+  itself (not app logic) decides which of two simultaneous claims wins
+- **Fixed (found in live testing):** an account re-opening an invite link it already held access to
+  (most often its own, right after creating the session) kept sealing and inserting duplicate
+  `session_access`/`session_participants` rows. `joinExistingSession` now checks the account's own
+  decrypted rows for a `sessionId` match first and resolves straight there instead
+- **Fixed (found in live testing):** an account holder's messages showed as "Someone" instead of
+  their username — `display_name` is deliberately left `null` for account holders (resolved live),
+  but `SessionView.vue` was reading it with `?? 'Someone'` and never actually doing that
+  resolution. `applyParticipant` now calls `fetchAccountByPublicKey` for a null `display_name`, and
+  the participant-name map became a Vue `reactive()` Map so the thread re-renders once the lookup
+  resolves instead of a message's sender name staying baked in from before it finished
+- **Expanded:** guest name word lists (`src/lib/guestName.ts`) from 16×16 to 31 colors × 149
+  animals/flowers
 - See "An account is just another identity" and "Why a personal link isn't enough" in
   `docs/system-design.md` §3 for the full design reasoning
 

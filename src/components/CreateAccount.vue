@@ -15,6 +15,13 @@ const error = ref('')
 const accountLink = ref('')
 const copied = ref(false)
 
+// Kept locally until "Continue" — signing the user in immediately would
+// switch the home screen out from under them (App.vue swaps to AccountHome
+// as soon as currentAccount is set) before they ever see this link.
+let pendingIdentity: { privateKey: CryptoKey; publicKey: CryptoKey; publicKeyId: string; packedKey: string } | null =
+  null
+let pendingAccount: Awaited<ReturnType<typeof createAccount>> = null
+
 async function submit() {
   const name = username.value.trim()
   if (!name || creating.value) return
@@ -31,7 +38,8 @@ async function submit() {
     }
 
     const packedKey = packJwk(await exportPrivateKey(identity.privateKey))
-    setCurrentAccount(identity.privateKey, identity.publicKey, publicKeyId, account, packedKey)
+    pendingIdentity = { privateKey: identity.privateKey, publicKey: identity.publicKey, publicKeyId, packedKey }
+    pendingAccount = account
     accountLink.value = `${location.origin}${location.pathname}${accountHash(packedKey)}`
   } catch (err) {
     logDebug(`createAccount failed: ${err}`, 'error')
@@ -49,6 +57,14 @@ async function copyLink() {
 }
 
 function finish() {
+  if (!pendingIdentity || !pendingAccount) return
+  setCurrentAccount(
+    pendingIdentity.privateKey,
+    pendingIdentity.publicKey,
+    pendingIdentity.publicKeyId,
+    pendingAccount,
+    pendingIdentity.packedKey,
+  )
   navigateReplace(homeHash)
 }
 </script>

@@ -3,13 +3,15 @@ import { ref, onMounted } from 'vue'
 import { currentAccount, logout } from '../lib/auth'
 import { startNewSession } from '../api/sessionActions'
 import { fetchSessionList, type SessionListItem } from '../api/sessionList'
-import { mySessionHash, navigate, homeHash } from '../lib/route'
+import { mySessionHash, navigate, homeHash, parseHash, extractHash } from '../lib/route'
 import { logDebug } from '../debug'
 
 const items = ref<SessionListItem[]>([])
 const loading = ref(true)
 const starting = ref(false)
 const failed = ref(false)
+const pastedLink = ref('')
+const pasteError = ref('')
 
 async function loadList() {
   if (!currentAccount.value) return
@@ -48,6 +50,18 @@ function openSession(sessionId: string) {
   navigate(mySessionHash(sessionId))
 }
 
+function goToPastedLink() {
+  pasteError.value = ''
+  if (!pastedLink.value.trim()) return
+
+  const hash = extractHash(pastedLink.value)
+  if (parseHash(hash).name === 'home') {
+    pasteError.value = "That doesn't look like a session link — check you copied the whole thing."
+    return
+  }
+  navigate(hash)
+}
+
 function nameFor(item: SessionListItem): string {
   if (!item.otherParticipants.length) return item.title || 'Just you, for now'
   return item.title || item.otherParticipants.join(', ')
@@ -70,6 +84,18 @@ function onLogout() {
       {{ starting ? 'Starting…' : 'Start a session' }}
     </button>
     <p v-if="failed" class="error">Couldn't start a session — check your connection and try again.</p>
+
+    <div class="divider"><span>or</span></div>
+
+    <div class="link-block">
+      <label>Join a session</label>
+      <p class="hint">Paste an invite link, and it'll be added to your chat list.</p>
+      <div class="link-row">
+        <input v-model="pastedLink" placeholder="Paste link here" @keydown.enter="goToPastedLink" />
+        <button @click="goToPastedLink">Go</button>
+      </div>
+      <p v-if="pasteError" class="error">{{ pasteError }}</p>
+    </div>
 
     <p v-if="loading" class="status">Loading your sessions…</p>
     <ul v-else class="list">
@@ -136,6 +162,70 @@ function onLogout() {
 .status {
   color: var(--text-muted);
   margin: 0;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.link-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.75rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+.link-block label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.link-row {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.link-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.link-row button {
+  padding: 0 0.75rem;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  white-space: nowrap;
 }
 
 .list {

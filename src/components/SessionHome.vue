@@ -48,29 +48,31 @@ function goToPastedLink() {
       Start an end-to-end encrypted session. Your keys are generated in this browser and never sent
       anywhere — only you (and whoever you invite) can read the messages.
     </p>
-    <button class="primary" :disabled="starting" @click="startSession">
-      {{ starting ? 'Starting…' : 'Start a session' }}
-    </button>
-    <p v-if="failed" class="error">Couldn't start a session — check your connection and try again.</p>
-
-    <div class="divider"><span>or</span></div>
-
-    <div class="link-block">
-      <label>Go to a session</label>
-      <p class="hint">Paste a personal or invite link you saved, and it'll take you there.</p>
-      <div class="link-row">
-        <input v-model="pastedLink" placeholder="Paste link here" @keydown.enter="goToPastedLink" />
-        <button @click="goToPastedLink">Go</button>
-      </div>
-      <p v-if="pasteError" class="error">{{ pasteError }}</p>
-    </div>
-
-    <div class="divider"><span>or</span></div>
-
     <button v-if="!showCreateAccount" class="secondary" @click="showCreateAccount = true">
       Create an account
     </button>
     <CreateAccount v-else @cancel="showCreateAccount = false" />
+
+    <template v-if="!showCreateAccount">
+      <div class="divider"><span>or</span></div>
+
+      <button class="primary" :disabled="starting" @click="startSession">
+        {{ starting ? 'Starting…' : 'Start a session' }}
+      </button>
+      <p v-if="failed" class="error">Couldn't start a session — check your connection and try again.</p>
+
+      <div class="divider"><span>or</span></div>
+
+      <div class="link-block">
+        <label>Join a session</label>
+        <p class="hint">Paste a personal or invite link you saved, and it'll take you there.</p>
+        <div class="link-row">
+          <input v-model="pastedLink" placeholder="Paste link here" @keydown.enter="goToPastedLink" />
+          <button @click="goToPastedLink">Go</button>
+        </div>
+        <p v-if="pasteError" class="error">{{ pasteError }}</p>
+      </div>
+    </template>
   </div>
 </template>
 

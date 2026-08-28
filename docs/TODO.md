@@ -16,21 +16,30 @@ Key functions: `sealForRecipient`/`openSealed`/`deriveLookupTag`/`generateSessio
 See §3 in `docs/system-design.md` and "Rebuilding the Chat Model for a Hidden Membership Graph" in
 `docs/experience.md` for the full design and what was deliberately scoped out.
 
-**Stage B: accounts + hidden session index** (pending merge) — accounts reuse the exact guest
+**Stage B: accounts + hidden session index** (v0.5.0) — accounts reuse the exact guest
 mechanism (keypair + `deriveLookupTag('session-access')`) with one difference: the keypair is
 stable, so one query rebuilds a whole chat list (`src/api/sessionList.ts`). New
 `#/mysession/<sessionId>` route disambiguates which of an account's many sessions a chat-list tap
 means, since a bare personal link can no longer assume "the one session" once an account holds more
 than one. `accounts.public_key` is the one intentionally searchable identity value in the schema.
-See the "account is just another identity" + "why a personal link isn't enough" entries in
+Also shipped in this stage's PR after live testing: single-use expiring invite links, an
+already-a-member guard, "Join as guest/existing user/`<username>`", and live username resolution
+for account holders in the thread. See the "account is just another identity" + "why a personal
+link isn't enough" entries in `docs/system-design.md` §3.
+
+**Stage C: guest → account migration** (pending) — `migrateGuestSessionToAccount`
+(`src/api/sessionActions.ts`) adds an account's own `session_access` row to a session it currently
+only holds as a guest, without touching `session_participants` or re-keying anything: the new row
+pins `identityPublicKeyId` to the guest's original public key, so the session keeps presenting as
+that one identity forever — old messages (immutably tagged with that key at send time) and any new
+ones after migration resolve against the exact same participant row, with zero special-casing in
+`SessionView.vue`'s render path. See "An account can migrate a guest session it already holds" in
 `docs/system-design.md` §3.
 
 ## Next (Current Sprint)
 
 Continuing the session-model rebuild, in order:
 
-- [ ] **Stage C** — guest → account migration via a personal link, with a private identity alias so
-      history renders correctly with no special-casing
 - [ ] **Stage D** — real multi-participant support: invite by public key into an existing session,
       an `accepted` flag with view-only enforcement (client-checked, not server-verified), a
       collapsible session list grouped by other participant

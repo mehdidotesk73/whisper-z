@@ -247,14 +247,35 @@ under its tag, then opens each envelope until it finds the one whose decrypted `
 the route — the id in the URL is just a disambiguator, never a capability, since it's meaningless
 without the account's private key to actually open anything. This is also the flag that turns off
 the **Warning** control: an account-backed session is always recoverable via the account's own link,
-so there is nothing to warn about losing.
+so there is nothing to warn about losing — and the same flag (checked at mount for a `packedKey`
+route the current account already has access to) turns it off for a migrated guest session too, for
+the same reason.
+
+**An account can migrate a guest session it already holds, with zero special-casing in the render
+path.** A message's `sender` field (see below) is baked into its ciphertext at send time —
+immutable, unlike `display_name` or an account's username, which can both be resolved live. So
+"attach my guest session to my account" can't retroactively relabel history the way an ordinary
+account join can; the only way old and new messages keep resolving to the *same* participant is if
+they keep using the *same* public key id, forever. `migrateGuestSessionToAccount`
+(`src/api/sessionActions.ts`) does exactly that: it seals the account a **second** `session_access`
+row for the same session — sealed to the account's real public key as always, so only the account
+can find it via its own lookup tag — but the payload's `identityPublicKeyId` is pinned to the
+*guest's original public key*, not the account's. `SessionView.vue` and `sessionList.ts` both read
+`identityPublicKeyId ?? account.publicKeyId` wherever they'd otherwise use "my own public key," so a
+migrated session behaves, from the render path's perspective, exactly like a session nobody ever
+migrated: the one existing `session_participants` row (guest key, guest display name) is never
+touched, the account's real public key never has to appear anywhere in this session's data, and old
+messages / new messages / "mine" detection all keep working off the one unchanged identity. The
+guest's original personal link keeps working afterward too — migration only *adds* an access path,
+the same non-destructive philosophy as adding a participant to shared-key sessions in the first
+place. Idempotent by construction: re-migrating just finds the row `joinExistingSession`'s
+`alreadyHasAccess` check would also find, and returns without inserting a duplicate.
 
 **Messages carry their sender inside the ciphertext, not a column.** A decrypted message is
 `{ sender: <public key JSON>, text, createdAt }` (`src/lib/sessionTypes.ts`). `SessionView` decrypts
 each row with the session key, matches `sender` against its own public key for "mine" styling, and
 looks up everyone else's current name via the in-memory `session_participants` map kept live by a
-realtime subscription — so a message's displayed sender name can update if that mapping changes
-later (relevant once guest→account migration lands), without rewriting the message itself.
+realtime subscription.
 
 **No "waiting for the other side" state anymore.** Because the session key isn't derived from a
 second person's public key, the creator has full read/write access to their own session the instant
@@ -314,7 +335,8 @@ src/components/
   CreateAccount.vue   generate an account keypair + username, reveal its one-time account link
   JoinSession.vue     redeem an invite link as the logged-in account, a guest, or by logging in
                       on the spot (pasting an account link) — all via sessionActions.ts
-  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId
+  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId,
+                      and a guest route can migrate to an account in place ("+ Add to account")
 ```
 
 ## §7 — Build, Deploy & Conventions

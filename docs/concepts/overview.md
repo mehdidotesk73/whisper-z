@@ -12,9 +12,14 @@ session opens immediately: you can start typing right away, even before anyone e
 From inside the session:
 - **Invite** reveals a link you can send to someone so they can join. It works once and expires
   after 10 minutes — tap **New link, for another person** to invite someone else.
+- **+ Add to account** (only shown if you joined as a guest) adds this session to an account's chat
+  list — either your own, if you're signed in, or one you sign into on the spot by pasting its
+  account link. Nothing about the session or its history changes; this just gives you a second way
+  to reach it, so you don't have to keep guarding the personal link.
 - **⚠ Warning** reveals your **personal link** — save it (bookmark it, message it to yourself) so
   you can reopen this exact session later on this device. Closing the tab without saving it means
-  losing access for good; there's no password and no recovery.
+  losing access for good; there's no password and no recovery. Once a session has been added to an
+  account, this stops applying to it — the account link already covers recovery.
 
 ## Joining a session
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   importPrivateKey,
   publicJwkFromPrivateJwk,
@@ -29,10 +29,14 @@ import {
 import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash } from '../lib/route'
+import { currentAccount } from '../lib/auth'
+import { fetchAccountByPublicKey } from '../api/accounts'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
-const props = defineProps<{ packedKey: string }>()
+// Either a guest personal-link key, or an account's session id (looked up
+// against the account's own stable identity — see lib/auth.ts).
+const props = defineProps<{ packedKey?: string; sessionId?: string }>()
 
 type Status = 'loading' | 'ready' | 'not-found'
 const status = ref<Status>('loading')
@@ -40,7 +44,7 @@ const status = ref<Status>('loading')
 interface RenderedMessage {
   id: string
   mine: boolean
-  senderName: string
+  sender: string
   text: string
 }
 
@@ -50,11 +54,13 @@ const sending = ref(false)
 const scrollAnchor = ref<HTMLElement>()
 const composerTextarea = ref<HTMLTextAreaElement>()
 
-let sessionId = ''
+let activeSessionId = ''
 let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
 let ownPublicKeyId = ''
-const participantNames = new Map<string, string>() // public key JSON -> display name
+// Reactive so the template re-renders once an account holder's username
+// resolves — see applyParticipant below.
+const participantNames = reactive(new Map<string, string>()) // public key id -> display name
 const seenMessageIds = new Set<string>()
 let messageChannel: RealtimeChannel | null = null
 let participantChannel: RealtimeChannel | null = null
@@ -63,8 +69,17 @@ function nameFor(publicKeyJson: string): string {
   return participantNames.get(publicKeyJson) ?? 'Someone'
 }
 
-function applyParticipant(row: ParticipantRow) {
-  participantNames.set(row.public_key, row.display_name ?? 'Someone')
+// A guest's display_name is set at join time and used as-is. An account
+// holder's is deliberately left null (system-design.md §3) so their current
+// username is resolved live instead of frozen at join time — that lookup
+// happens here.
+async function applyParticipant(row: ParticipantRow) {
+  if (row.display_name) {
+    participantNames.set(row.public_key, row.display_name)
+    return
+  }
+  const account = await fetchAccountByPublicKey(row.public_key)
+  participantNames.set(row.public_key, account?.username ?? 'Someone')
 }
 
 async function scrollToBottom() {
@@ -81,7 +96,7 @@ async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string
     messages.value.push({
       id: row.id,
       mine: plain.sender === ownPublicKeyId,
-      senderName: plain.sender === ownPublicKeyId ? 'You' : nameFor(plain.sender),
+      sender: plain.sender,
       text: plain.text,
     })
     scrollToBottom()
@@ -92,10 +107,22 @@ async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string
 
 onMounted(async () => {
   try {
-    const privateKeyJwk = unpackJwk(props.packedKey)
-    const privateKey = await importPrivateKey(privateKeyJwk)
-    const publicKeyJwk = publicJwkFromPrivateJwk(privateKeyJwk)
-    ownPublicKeyId = canonicalPublicKeyId(publicKeyJwk)
+    let privateKey: CryptoKey
+    if (props.sessionId) {
+      if (!currentAccount.value) {
+        status.value = 'not-found'
+        return
+      }
+      privateKey = currentAccount.value.privateKey
+      ownPublicKeyId = currentAccount.value.publicKeyId
+    } else if (props.packedKey) {
+      const privateKeyJwk = unpackJwk(props.packedKey)
+      privateKey = await importPrivateKey(privateKeyJwk)
+      ownPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
+    } else {
+      status.value = 'not-found'
+      return
+    }
 
     const ownerPub = await deriveLookupTag(privateKey, 'session-access')
     const rows = await fetchSessionAccessForOwner(ownerPub)
@@ -104,20 +131,36 @@ onMounted(async () => {
       return
     }
 
-    const access = await openSealed<SessionAccessPayload>(toEnvelope(rows[0]), privateKey)
-    sessionId = access.sessionId
+    let access: SessionAccessPayload | null = null
+    if (props.sessionId) {
+      // An account's tag can hold many sessions — find the one this route names.
+      for (const row of rows) {
+        const candidate = await openSealed<SessionAccessPayload>(toEnvelope(row), privateKey)
+        if (candidate.sessionId === props.sessionId) {
+          access = candidate
+          break
+        }
+      }
+    } else {
+      access = await openSealed<SessionAccessPayload>(toEnvelope(rows[0]), privateKey)
+    }
+    if (!access) {
+      status.value = 'not-found'
+      return
+    }
+    activeSessionId = access.sessionId
     sessionKeyJwk = access.sessionKey
     sessionKey = await importSessionKey(access.sessionKey)
 
-    const participants = await fetchParticipants(sessionId)
-    for (const p of participants) applyParticipant(p)
-    participantChannel = subscribeParticipants(sessionId, applyParticipant)
+    const participants = await fetchParticipants(activeSessionId)
+    await Promise.all(participants.map(applyParticipant))
+    participantChannel = subscribeParticipants(activeSessionId, applyParticipant)
 
-    const existing = await fetchMessages(sessionId)
+    const existing = await fetchMessages(activeSessionId)
     for (const row of existing) await decodeAndAppend(row)
 
     status.value = 'ready'
-    messageChannel = subscribeMessages(sessionId, decodeAndAppend)
+    messageChannel = subscribeMessages(activeSessionId, decodeAndAppend)
   } catch (err) {
     logDebug(`Opening session failed: ${err}`, 'error')
     status.value = 'not-found'
@@ -137,7 +180,7 @@ async function send() {
   try {
     const payload: DecodedMessage = { sender: ownPublicKeyId, text, createdAt: new Date().toISOString() }
     const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(payload))
-    const ok = await sendMessage(sessionId, ciphertext, iv)
+    const ok = await sendMessage(activeSessionId, ciphertext, iv)
     if (ok) {
       draft.value = ''
       await nextTick()
@@ -170,18 +213,23 @@ const showInvite = ref(false)
 const inviteLink = ref('')
 const copiedInvite = ref(false)
 
+async function generateInvite() {
+  if (!sessionKeyJwk) return
+  copiedInvite.value = false
+  inviteLink.value = ''
+  const secretBytes = generateJoinSecret()
+  const joinKey = await importJoinKey(secretBytes)
+  const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+  const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
+  const joinId = await createJoinAccess({ ciphertext, iv })
+  if (!joinId) return
+  inviteLink.value = `${location.origin}${location.pathname}${joinHash(joinId, bytesToUrlSafe(secretBytes))}`
+}
+
 async function toggleInvite() {
   showWarning.value = false
   showInvite.value = !showInvite.value
-  if (showInvite.value && !inviteLink.value && sessionKeyJwk) {
-    const secretBytes = generateJoinSecret()
-    const joinKey = await importJoinKey(secretBytes)
-    const payload: JoinPayload = { sessionId, sessionKey: sessionKeyJwk }
-    const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
-    const joinId = await createJoinAccess({ ciphertext, iv })
-    if (!joinId) return
-    inviteLink.value = `${location.origin}${location.pathname}${joinHash(joinId, bytesToUrlSafe(secretBytes))}`
-  }
+  if (showInvite.value && !inviteLink.value) await generateInvite()
 }
 
 async function copyInvite() {
@@ -191,9 +239,10 @@ async function copyInvite() {
   }
 }
 
-// Warning: always shown for now (no accounts yet — every session is guest-only).
+// Warning only applies to a guest (packedKey) route — an account-backed
+// (sessionId) route is recoverable via the account's own link instead.
 const showWarning = ref(false)
-const personalLink = `${location.origin}${location.pathname}#/session/${props.packedKey}`
+const personalLink = props.packedKey ? `${location.origin}${location.pathname}#/session/${props.packedKey}` : ''
 const copiedPersonal = ref(false)
 
 function toggleWarning() {
@@ -227,13 +276,16 @@ function goHome() {
     <div class="top-bar">
       <button class="chip" @click="goHome">← Home</button>
       <button v-if="status === 'ready'" class="chip" @click.stop="toggleInvite">Invite</button>
-      <button v-if="status === 'ready'" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
+      <button v-if="status === 'ready' && props.packedKey" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
     </div>
 
     <div ref="panelArea">
       <div v-if="showInvite" class="link-block">
         <label>Invite link</label>
-        <p class="hint">Send this to someone so they can join.</p>
+        <p class="hint">
+          Send this to someone so they can join. It works once and expires in 10 minutes — generate
+          a new one for the next person.
+        </p>
         <div class="link-row">
           <input
             readonly
@@ -242,6 +294,7 @@ function goHome() {
           />
           <button :disabled="!inviteLink" @click="copyInvite">{{ copiedInvite ? 'Copied ✓' : 'Copy' }}</button>
         </div>
+        <button class="new-link" :disabled="!inviteLink" @click="generateInvite">New link, for another person</button>
       </div>
 
       <div v-if="showWarning" class="link-block warning-block">
@@ -266,7 +319,7 @@ function goHome() {
       <ul class="thread">
         <li v-if="!messages.length" class="empty">No messages yet — say hello.</li>
         <li v-for="m in messages" :key="m.id" :class="['bubble', m.mine ? 'mine' : 'theirs']">
-          <span v-if="!m.mine" class="sender">{{ m.senderName }}</span>
+          <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
           {{ m.text }}
         </li>
         <li ref="scrollAnchor" class="anchor"></li>
@@ -381,6 +434,21 @@ function goHome() {
   background: var(--bg-elev-2);
   color: var(--text);
   white-space: nowrap;
+}
+
+.new-link {
+  align-self: flex-start;
+  padding: 0.3rem 0;
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  font-size: 0.8rem;
+  text-decoration: underline;
+}
+
+.new-link:disabled {
+  opacity: 0.6;
+  text-decoration: none;
 }
 
 .thread {

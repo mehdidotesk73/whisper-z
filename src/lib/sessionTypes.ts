@@ -5,6 +5,7 @@ export interface SessionAccessPayload {
   sessionId: string
   sessionKey: JsonWebKey
   role: 'owner' | 'member'
+  title?: string
 }
 
 export interface JoinPayload {

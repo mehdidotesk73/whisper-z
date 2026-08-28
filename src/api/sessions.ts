@@ -73,12 +73,21 @@ export function subscribeSessionAccess(
     .subscribe()
 }
 
-// --- join_access: a bearer link anyone holding its secret can redeem -------
+// --- join_access: a bearer link anyone holding its secret can redeem once --
+// exactly once, and only within a short window — see claimJoinAccess below.
 
 export interface JoinAccessRow {
   id: string
   ciphertext: string
   iv: string
+  created_at: string
+  consumed_at: string | null
+}
+
+export const JOIN_LINK_TTL_MS = 10 * 60 * 1000
+
+export function isJoinAccessExpired(row: Pick<JoinAccessRow, 'created_at'>): boolean {
+  return Date.now() - new Date(row.created_at).getTime() > JOIN_LINK_TTL_MS
 }
 
 export async function createJoinAccess(envelope: { ciphertext: string; iv: string }): Promise<string | null> {
@@ -95,14 +104,44 @@ export async function createJoinAccess(envelope: { ciphertext: string; iv: strin
   return data.id as string
 }
 
+/**
+ * Read-only lookup — used to validate a link (exists, not already consumed,
+ * not expired, secret matches) before showing "Join". Never mutates
+ * anything, so merely opening a link — even one that's stale or already
+ * used — can't itself grant access; only claimJoinAccess below can.
+ */
 export async function fetchJoinAccess(joinId: string): Promise<JoinAccessRow | null> {
-  const { data, error } = await supabase.from('join_access').select('*').eq('id', joinId).single()
+  const { data, error } = await supabase.from('join_access').select('*').eq('id', joinId).maybeSingle()
 
   if (error) {
     logDebug(`fetchJoinAccess failed: ${error.message}`, 'error')
     return null
   }
-  return data as JoinAccessRow
+  return data as JoinAccessRow | null
+}
+
+/**
+ * Atomically consumes a join link: `UPDATE ... WHERE consumed_at IS NULL
+ * RETURNING` is a single statement, so if two people click "Join" on the
+ * same link at once, Postgres only lets one of them see `consumed_at IS
+ * NULL` still true and win — the other's update matches zero rows and gets
+ * null back. The row is marked, not deleted, so a later visit can still
+ * tell "already used" apart from "never existed."
+ */
+export async function claimJoinAccess(joinId: string): Promise<JoinAccessRow | null> {
+  const { data, error } = await supabase
+    .from('join_access')
+    .update({ consumed_at: new Date().toISOString() })
+    .eq('id', joinId)
+    .is('consumed_at', null)
+    .select('*')
+    .maybeSingle()
+
+  if (error) {
+    logDebug(`claimJoinAccess failed: ${error.message}`, 'error')
+    return null
+  }
+  return data as JoinAccessRow | null
 }
 
 // --- session_participants: the shared, plaintext "who's in this session" --

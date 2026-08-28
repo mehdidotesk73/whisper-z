@@ -9,9 +9,9 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 - **Header/footer shell** — app title, Help modal, build/version info, reload affordance, debug panel
 - **Service-worker caching** — offline capability, smart update detection
 - **Mobile-first UX** — responsive, touch-optimized, no hover-only interactions
-- **Three screens** (`src/components/SessionHome.vue`, `JoinSession.vue`, `SessionView.vue`),
-  switched by a hash-based router (`src/lib/route.ts`) — no `vue-router`, just enough parsing for
-  three link shapes
+- **Five screens** (`src/components/SessionHome.vue`, `AccountHome.vue`, `CreateAccount.vue`,
+  `JoinSession.vue`, `SessionView.vue`), switched by a hash-based router (`src/lib/route.ts`) — no
+  `vue-router`, just enough parsing for five link shapes
 - **Pure computation layer** (`src/lib/`) — key agreement, sealed envelopes, encrypt/decrypt,
   routing, clipboard
 - **Data layer** (`src/api/`) — the Supabase client and opaque-record reads/writes/realtime
@@ -34,7 +34,9 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 │  │  ├─ DebugPanel                    │  │
 │  │  ├─ UpdateAvailablePrompt         │  │
 │  │  └─ route.ts picks one of:        │  │
-│  │   SessionHome│JoinSession│SessionView│
+│  │   SessionHome│AccountHome│        │  │
+│  │   CreateAccount│JoinSession│      │  │
+│  │   SessionView                     │  │
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
 │  │  lib/ (pure functions)            │  │
@@ -48,9 +50,18 @@ This is a Vue 3 + TypeScript + Vite single-page app (SPA) that works as a progre
 │  ┌───────────────────────────────────┐  │
 │  │  api/ (Supabase data access)      │  │
 │  │  ├─ supabase.ts (client)          │  │
-│  │  └─ sessions.ts (opaque reads/    │  │
-│  │      writes/realtime — the client │  │
-│  │      decrypts, the API doesn't)   │  │
+│  │  ├─ sessions.ts (opaque reads/    │  │
+│  │  │   writes/realtime — the client │  │
+│  │  │   decrypts, the API doesn't)   │  │
+│  │  ├─ accounts.ts (username ↔       │  │
+│  │  │   public key — the one         │  │
+│  │  │   intentionally searchable     │  │
+│  │  │   identity kind)               │  │
+│  │  ├─ sessionActions.ts (shared     │  │
+│  │  │   start/join, account-aware)   │  │
+│  │  └─ sessionList.ts (decrypts an   │  │
+│  │      account's own session_access │  │
+│  │      rows into a chat list)       │  │
 │  └───────────────────────────────────┘  │
 └──────────────────┬──────────────────────┘
                     │ nothing but ciphertext and
@@ -103,7 +114,7 @@ session_access (                                            -- "who can find thi
 )
 
 join_access (                                                -- a redeemable invite link
-  id uuid pk, ciphertext text, iv text, created_at
+  id uuid pk, ciphertext text, iv text, created_at, consumed_at nullable
 )
 
 session_participants (                                       -- who's in a session (plaintext — see below)
@@ -113,6 +124,15 @@ session_participants (                                       -- who's in a sessi
 
 messages (
   id uuid pk, session_id fk → sessions, ciphertext text, iv text, created_at
+)
+
+accounts (                                                    -- a stable, intentionally searchable identity
+  id uuid pk, username text unique, public_key text unique, created_at
+)
+
+private_account_state (                                       -- reserved for Stage C (guest→account migration)
+  id uuid pk, owner_pub text, ciphertext text, iv text,
+  ephemeral_public_key text, created_at
 )
 ```
 
@@ -149,22 +169,85 @@ derives the public key, the lookup tag, queries `session_access` for that tag, a
 whichever row comes back to learn the session id and the shared key. No session id, no role, no
 separate identifier needed in the URL at all.
 
-**Join links are a symmetric bearer secret, not tied to any identity.** Starting or reopening a
-session's Invite panel generates 32 random bytes (`generateJoinSecret`) used directly as a raw
-AES-256 key — no key agreement, since there's no recipient identity yet to agree with. The
-`join_access` row's ciphertext (session id + session key) is encrypted with those bytes; the link
+**Join links are a symmetric bearer secret, not tied to any identity — single-use and short-lived.**
+Tapping Invite generates 32 random bytes (`generateJoinSecret`) used directly as a raw AES-256 key —
+no key agreement, since there's no recipient identity yet to agree with. The `join_access` row's
+ciphertext (session id + session key) is encrypted with those bytes; the link
 (`#/join/<joinId>/<secret>`) carries a plain lookup id (safe — it's not secret on its own) and the
-secret in the fragment. Anyone who has the link can decrypt the row and become a participant;
-`joinId` is never treated as sensitive, `secret` never leaves the browser except inside that one
-fragment.
+secret in the fragment. Redeeming it (`claimJoinAccess`) is a single `UPDATE ... WHERE consumed_at
+IS NULL RETURNING` statement, not a read followed by a separate write — Postgres only lets one of
+any number of concurrent callers actually see `consumed_at IS NULL` still true and win, so if two
+people click "Join" on the same link at once, exactly one gets the row back and the other gets
+`null`. That's what makes this genuinely single-use rather than best-effort. The row is marked
+consumed rather than deleted specifically so a later visit can tell "already used" apart from
+"never existed" — `fetchJoinAccess` (the read-only check that runs when the link is first opened,
+before anyone has clicked "Join") looks at `consumed_at` for that message; merely opening a link,
+used or not, never mutates anything, so it can't itself grant access. It also expires:
+`isJoinAccessExpired` compares `created_at` against a 10-minute TTL (`JOIN_LINK_TTL_MS`), checked
+both on open and again at the atomic claim, so a link that goes stale between opening and clicking
+"Join" still can't be redeemed — attempting to claim an expired link consumes it on the spot, so no
+cron job is needed to close that window. Inviting a second person means generating a second link
+(the Invite panel's "New link, for another person"). Any participant, not just the session's owner,
+can currently mint an invite link — restricting that to the owner is one of the still-open gaps
+tracked in `docs/TODO.md`, alongside real (server-verified) role enforcement.
 
 **`session_participants` is deliberately plaintext, and that's fine.** It holds who's in a
 *specific, already-known* session — every legitimate participant already sees this by definition of
 being in the conversation, so hiding it from them buys nothing. What must stay hidden is the
 different fact of *which sessions a given identity belongs to across the whole table*, which is
 exactly what the `session_access` lookup-tag design above protects. `display_name` is set for a
-guest (a random name, `randomGuestName()`) and left `null` for an account holder once accounts
-exist, whose current username is meant to be resolved live instead of frozen at join time.
+guest (a random name, `randomGuestName()`) and left `null` for an account holder, whose current
+username is resolved live instead of frozen at join time — `SessionView.vue`'s `applyParticipant`
+calls `fetchAccountByPublicKey` for any row with a null `display_name`, and the participant-name map
+is a Vue `reactive()` Map (not a plain one) specifically so the thread re-renders once that lookup
+resolves, rather than a message's sender staying stuck on the "Someone" fallback it showed before
+the async lookup finished.
+
+**An account is just another identity — the same mechanism, a stable keypair.** Creating an account
+(`CreateAccount.vue`) generates a keypair exactly like a guest does, except the keypair is kept (a
+packed private key in `localStorage`, plus an `#/account/<packedKey>` link for another device) and
+reused as-is for every session the account touches, instead of a fresh one per session. It calls
+`deriveLookupTag(accountPrivateKey, 'session-access')` — the *same* function, the *same* purpose
+string — so `session_access` doesn't need to know or care whether a row's owner is a guest or an
+account. The one difference this stability buys: because the tag never changes, one query
+(`fetchSessionAccessForOwner`) returns every `session_access` row the account has ever been sealed
+into, which `src/api/sessionList.ts` decrypts into a chat list. `accounts.public_key` is the one
+identity value in this schema that's deliberately plaintext and searchable — that's what lets
+someone start a session targeted at an account by its username-resolved public key, and what lets a
+chat list resolve a fellow participant's current username. It is never used as `session_access`'s
+lookup column; that stays the private-key-derived tag, so a database dump still can't connect an
+account to the sessions it holds.
+
+**An account's stable keypair means re-opening an invite it's already used must not re-join.** A
+guest identity is fresh every visit, so "have I already joined this session?" is never a question
+for one — but an account reuses the same keypair everywhere, so without a check, an account
+re-opening an invite link it already redeemed (its own, most commonly, since the owner is the one
+holding the link right after creating it) would seal and insert a *second* `session_access` row and
+a duplicate `session_participants` row on every visit. `joinExistingSession`
+(`src/api/sessionActions.ts`) guards this: before doing anything else, it decrypts the account's own
+`session_access` rows (the same query `sessionList.ts` uses) looking for one whose `sessionId`
+already matches, and if it finds one, returns that session id directly instead of creating anything
+— the caller just navigates there, same as a normal join. A guest never runs this check (there's
+nothing to find), so this only ever short-circuits an account.
+
+**An invite link offers all three ways to redeem it, decided in the UI, not the data.** `JoinSession.vue`
+shows `Join as <username>` when `currentAccount` is already set, `Join as guest` /
+`Join as existing user` otherwise — "existing user" just calls `loginWithPackedKey` on a pasted
+account link and then calls the same `join()` used everywhere else. Nothing about the join link or
+the join payload encodes which path was taken; it's purely which identity happens to be active in
+the browser when "Join" is actually clicked. This is the same "one session system, different ways
+to access it" principle the whole account/guest split is built on.
+
+**Why a personal link isn't enough once an account exists: the `mysession` route.** A bare private
+key resolves to "whichever `session_access` row that tag has" — fine when there's exactly one, which
+is true for every guest identity by construction (a fresh keypair per session). An account's tag can
+have many. So opening a session from a chat list uses `#/mysession/<sessionId>` instead of
+`#/session/<packedKey>`: `SessionView` uses the *logged-in account's* keypair to fetch every row
+under its tag, then opens each envelope until it finds the one whose decrypted `sessionId` matches
+the route — the id in the URL is just a disambiguator, never a capability, since it's meaningless
+without the account's private key to actually open anything. This is also the flag that turns off
+the **Warning** control: an account-backed session is always recoverable via the account's own link,
+so there is nothing to warn about losing.
 
 **Messages carry their sender inside the ciphertext, not a column.** A decrypted message is
 `{ sender: <public key JSON>, text, createdAt }` (`src/lib/sessionTypes.ts`). `SessionView` decrypts
@@ -226,9 +309,12 @@ Organized by feature. Keep them thin — mostly templating, logic lives in `lib/
 ```
 src/components/
   HelpModal.vue       renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
-  SessionHome.vue     "Start a session" + paste-a-link box
-  JoinSession.vue     redeem an invite link, generating a fresh identity
-  SessionView.vue     the thread — opens immediately, Invite/Warning controls, composer
+  SessionHome.vue     logged-out home: "Start a session" + paste-a-link box + "Create an account"
+  AccountHome.vue     logged-in home: chat list (src/api/sessionList.ts) + "Start a session"
+  CreateAccount.vue   generate an account keypair + username, reveal its one-time account link
+  JoinSession.vue     redeem an invite link as the logged-in account, a guest, or by logging in
+                      on the spot (pasting an account link) — all via sessionActions.ts
+  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId
 ```
 
 ## §7 — Build, Deploy & Conventions

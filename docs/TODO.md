@@ -16,12 +16,19 @@ Key functions: `sealForRecipient`/`openSealed`/`deriveLookupTag`/`generateSessio
 See §3 in `docs/system-design.md` and "Rebuilding the Chat Model for a Hidden Membership Graph" in
 `docs/experience.md` for the full design and what was deliberately scoped out.
 
+**Stage B: accounts + hidden session index** (pending merge) — accounts reuse the exact guest
+mechanism (keypair + `deriveLookupTag('session-access')`) with one difference: the keypair is
+stable, so one query rebuilds a whole chat list (`src/api/sessionList.ts`). New
+`#/mysession/<sessionId>` route disambiguates which of an account's many sessions a chat-list tap
+means, since a bare personal link can no longer assume "the one session" once an account holds more
+than one. `accounts.public_key` is the one intentionally searchable identity value in the schema.
+See the "account is just another identity" + "why a personal link isn't enough" entries in
+`docs/system-design.md` §3.
+
 ## Next (Current Sprint)
 
 Continuing the session-model rebuild, in order:
 
-- [ ] **Stage B** — accounts (keypair + username) with a chat list built by decrypting opaque
-      `session_access` rows; a database dump reveals nothing about which sessions an account holds
 - [ ] **Stage C** — guest → account migration via a personal link, with a private identity alias so
       history renders correctly with no special-casing
 - [ ] **Stage D** — real multi-participant support: invite by public key into an existing session,
@@ -48,6 +55,11 @@ One-time setup — tick these off as they're done:
   capability verifier, plus the fine-grained `K_INVITE_MEMBER`/`K_GRANT_ADMIN`-style permission
   system it would actually enforce. Without the verifier, permissions beyond owner/member are UI
   suggestions, not real boundaries — see `docs/experience.md` for the full reasoning
+- Invite links are single-use and expire after 10 minutes now (`claimJoinAccess`,
+  `isJoinAccessExpired` in `src/api/sessions.ts`), but any participant — not just the session's
+  owner — can currently mint one. Restricting that to the owner needs a `role` check in
+  `SessionView.vue`'s Invite button, which is easy client-side but, like everything else here, not
+  server-enforced until the capability verifier above exists
 
 ## Docs
 

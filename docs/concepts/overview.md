@@ -10,16 +10,30 @@ spot — nothing is typed in, nothing sent anywhere except what's needed to invi
 session opens immediately: you can start typing right away, even before anyone else has joined.
 
 From inside the session:
-- **Invite** reveals a link you can send to someone so they can join.
+- **Invite** reveals a link you can send to someone so they can join. It works once and expires
+  after 10 minutes — tap **New link, for another person** to invite someone else.
 - **⚠ Warning** reveals your **personal link** — save it (bookmark it, message it to yourself) so
   you can reopen this exact session later on this device. Closing the tab without saving it means
   losing access for good; there's no password and no recovery.
 
 ## Joining a session
 
-Open the invite link you were sent and tap **Join session**. This generates your own keypair and
-adds you to the conversation — you'll land in the same thread, with your own personal link
-available the same way.
+Open the invite link you were sent. If you're already signed in to an account, you'll see **Join as
+&lt;your username&gt;** — tap it and the session is added straight to your chat list, no link to
+save. If you're not signed in, you get a choice:
+- **Join as guest** generates a fresh keypair in this browser and adds you to the conversation —
+  you'll land in the same thread, with your own personal link available the same way.
+- **Join as existing user** lets you paste your account link on the spot to sign in, then joins
+  with that account — handy when you're on a device you haven't logged into yet.
+
+## Accounts
+
+An account keeps a chat list, so you don't need to save a personal link for every session — tap
+**Create an account**, pick a username, and save the **account link** it shows you once. That link
+is the only way to sign back in on another device or after clearing your browser; there's still no
+password and no recovery. Once signed in, starting or joining a session adds it to your list
+automatically, and the personal-link Warning no longer applies to sessions opened from an account,
+since the account link already covers that.
 
 ## Chatting
 

@@ -12,6 +12,8 @@ export type Route =
   | { name: 'home' }
   | { name: 'join'; joinId: string; secret: string }
   | { name: 'session'; packedKey: string }
+  | { name: 'mysession'; sessionId: string }
+  | { name: 'account'; packedKey: string }
 
 export function parseHash(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean)
@@ -21,6 +23,12 @@ export function parseHash(hash: string): Route {
   }
   if (parts[0] === 'session' && parts[1]) {
     return { name: 'session', packedKey: parts[1] }
+  }
+  if (parts[0] === 'mysession' && parts[1]) {
+    return { name: 'mysession', sessionId: parts[1] }
+  }
+  if (parts[0] === 'account' && parts[1]) {
+    return { name: 'account', packedKey: parts[1] }
   }
   return { name: 'home' }
 }
@@ -60,6 +68,14 @@ export function sessionHash(packedKey: string): string {
 
 export function joinHash(joinId: string, secret: string): string {
   return `#/join/${joinId}/${secret}`
+}
+
+export function mySessionHash(sessionId: string): string {
+  return `#/mysession/${sessionId}`
+}
+
+export function accountHash(packedKey: string): string {
+  return `#/account/${packedKey}`
 }
 
 export const homeHash = '#/'

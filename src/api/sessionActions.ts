@@ -12,14 +12,37 @@ import {
   generateSessionKey,
   exportSessionKey,
   sealForRecipient,
+  openSealed,
   deriveLookupTag,
   packJwk,
   canonicalPublicKeyId,
 } from '../lib/crypto'
-import { createSession, insertSessionAccess, addParticipant } from './sessions'
+import { createSession, insertSessionAccess, addParticipant, fetchSessionAccessForOwner, toEnvelope } from './sessions'
 import { randomGuestName } from '../lib/guestName'
 import type { SessionAccessPayload, JoinPayload } from '../lib/sessionTypes'
 import type { CurrentAccount } from '../lib/auth'
+
+/**
+ * An account's tag is stable, so opening an invite link to a session it
+ * already holds (e.g. the owner re-opening their own invite, or a link
+ * shared twice) would otherwise just add a duplicate session_access +
+ * session_participants row on every visit. A guest never needs this check:
+ * each visit generates a brand new keypair, so it can never already hold
+ * access to anything.
+ */
+async function alreadyHasAccess(account: CurrentAccount, sessionId: string): Promise<boolean> {
+  const ownerPub = await deriveLookupTag(account.privateKey, 'session-access')
+  const rows = await fetchSessionAccessForOwner(ownerPub)
+  for (const row of rows) {
+    try {
+      const payload = await openSealed<SessionAccessPayload>(toEnvelope(row), account.privateKey)
+      if (payload.sessionId === sessionId) return true
+    } catch {
+      // Not openable by this identity — not this session's row, ignore.
+    }
+  }
+  return false
+}
 
 interface Identity {
   privateKey: CryptoKey
@@ -67,6 +90,10 @@ export async function joinExistingSession(
   joinPayload: JoinPayload,
   account: CurrentAccount | null,
 ): Promise<StartedSession | null> {
+  if (account && (await alreadyHasAccess(account, joinPayload.sessionId))) {
+    return { sessionId: joinPayload.sessionId, packedKey: null }
+  }
+
   const identity = await resolveIdentity(account)
 
   const payload: SessionAccessPayload = {

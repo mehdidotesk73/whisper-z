@@ -214,6 +214,18 @@ chat list resolve a fellow participant's current username. It is never used as `
 lookup column; that stays the private-key-derived tag, so a database dump still can't connect an
 account to the sessions it holds.
 
+**An account's stable keypair means re-opening an invite it's already used must not re-join.** A
+guest identity is fresh every visit, so "have I already joined this session?" is never a question
+for one — but an account reuses the same keypair everywhere, so without a check, an account
+re-opening an invite link it already redeemed (its own, most commonly, since the owner is the one
+holding the link right after creating it) would seal and insert a *second* `session_access` row and
+a duplicate `session_participants` row on every visit. `joinExistingSession`
+(`src/api/sessionActions.ts`) guards this: before doing anything else, it decrypts the account's own
+`session_access` rows (the same query `sessionList.ts` uses) looking for one whose `sessionId`
+already matches, and if it finds one, returns that session id directly instead of creating anything
+— the caller just navigates there, same as a normal join. A guest never runs this check (there's
+nothing to find), so this only ever short-circuits an account.
+
 **Why a personal link isn't enough once an account exists: the `mysession` route.** A bare private
 key resolves to "whichever `session_access` row that tag has" — fine when there's exactly one, which
 is true for every guest identity by construction (a fresh keypair per session). An account's tag can

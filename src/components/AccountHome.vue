@@ -3,6 +3,9 @@ import { ref, onMounted } from 'vue'
 import { currentAccount, logout } from '../lib/auth'
 import { startNewSession } from '../api/sessionActions'
 import { fetchSessionList, type SessionListItem } from '../api/sessionList'
+import { checkForInvites, acceptInvite, rejectInvite, type PendingInvite } from '../api/inviteActions'
+import { exportPublicKey, packJwk } from '../lib/crypto'
+import { copyToClipboard } from '../lib/clipboard'
 import { mySessionHash, navigate, homeHash, parseHash, extractHash } from '../lib/route'
 import { logDebug } from '../debug'
 
@@ -26,6 +29,60 @@ async function loadList() {
 }
 
 onMounted(loadList)
+
+// Share-my-key + pending invites: see api/inviteActions.ts and
+// lib/crypto.ts's "Pairwise discoverable secrets" section. My public key
+// is safe to show/copy openly (it's already the one intentionally public
+// value in this schema) — someone else pastes it into their own session's
+// "Invite by key" to add me, entirely out of band, no lookup involved.
+const myPublicKeyBlob = ref('')
+const showMyKey = ref(false)
+const copiedMyKey = ref(false)
+const pendingInvites = ref<PendingInvite[]>([])
+const invitesLoading = ref(true)
+const respondingId = ref<string | null>(null)
+
+onMounted(async () => {
+  if (!currentAccount.value) return
+  myPublicKeyBlob.value = packJwk(await exportPublicKey(currentAccount.value.publicKey))
+  invitesLoading.value = true
+  try {
+    pendingInvites.value = await checkForInvites(currentAccount.value)
+  } catch (err) {
+    logDebug(`checkForInvites failed: ${err}`, 'error')
+  } finally {
+    invitesLoading.value = false
+  }
+})
+
+function toggleMyKey() {
+  showMyKey.value = !showMyKey.value
+}
+
+async function copyMyKey() {
+  if (await copyToClipboard(myPublicKeyBlob.value)) {
+    copiedMyKey.value = true
+    setTimeout(() => (copiedMyKey.value = false), 1500)
+  }
+}
+
+async function respondToInvite(invite: PendingInvite, accept: boolean) {
+  if (!currentAccount.value) return
+  respondingId.value = invite.id
+  try {
+    if (accept) {
+      const started = await acceptInvite(invite, currentAccount.value)
+      if (!started) return
+      pendingInvites.value = pendingInvites.value.filter((i) => i.id !== invite.id)
+      navigate(mySessionHash(started.sessionId))
+    } else {
+      await rejectInvite(invite.id)
+      pendingInvites.value = pendingInvites.value.filter((i) => i.id !== invite.id)
+    }
+  } finally {
+    respondingId.value = null
+  }
+}
 
 async function startSession() {
   if (!currentAccount.value) return
@@ -77,8 +134,44 @@ function onLogout() {
   <div class="account-home">
     <div class="top-row">
       <p class="whoami">Signed in as <strong>{{ currentAccount?.account.username }}</strong></p>
-      <button class="chip" @click="onLogout">Log out</button>
+      <div class="top-row-actions">
+        <button class="chip" @click="toggleMyKey">My public key</button>
+        <button class="chip" @click="onLogout">Log out</button>
+      </div>
     </div>
+
+    <div v-if="showMyKey" class="link-block">
+      <p class="hint">
+        Share this with someone (in person, or however you already trust) so they can invite you to
+        a session directly, without a link.
+      </p>
+      <div class="link-row">
+        <input readonly :value="myPublicKeyBlob" @focus="($event.target as HTMLInputElement).select()" />
+        <button @click="copyMyKey">{{ copiedMyKey ? 'Copied ✓' : 'Copy' }}</button>
+      </div>
+    </div>
+
+    <ul v-if="pendingInvites.length" class="list invites">
+      <li v-for="invite in pendingInvites" :key="invite.id" class="row invite-row">
+        <span class="name">New session invite</span>
+        <div class="invite-actions">
+          <button
+            class="chip"
+            :disabled="respondingId === invite.id"
+            @click="respondToInvite(invite, true)"
+          >
+            Accept
+          </button>
+          <button
+            class="chip warning"
+            :disabled="respondingId === invite.id"
+            @click="respondToInvite(invite, false)"
+          >
+            Reject
+          </button>
+        </div>
+      </li>
+    </ul>
 
     <button class="primary" :disabled="starting" @click="startSession">
       {{ starting ? 'Starting…' : 'Start a session' }}
@@ -128,6 +221,11 @@ function onLogout() {
   color: var(--text-muted);
 }
 
+.top-row-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
 .chip {
   padding: 0.4rem 0.8rem;
   min-height: 44px;
@@ -137,6 +235,24 @@ function onLogout() {
   color: var(--text);
   font-size: 0.85rem;
   font-weight: 600;
+}
+
+.chip.warning {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.chip:disabled {
+  opacity: 0.6;
+}
+
+.invite-row {
+  cursor: default;
+}
+
+.invite-actions {
+  display: flex;
+  gap: 0.4rem;
 }
 
 .primary {

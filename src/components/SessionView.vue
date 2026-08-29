@@ -29,6 +29,7 @@ import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } f
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
 import { isIdentityMerged, migrateGuestSessionToAccount } from '../api/sessionActions'
+import { createSessionInvite, rejectInvite } from '../api/inviteActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
 import type { RealtimeChannel } from '@supabase/supabase-js'
@@ -57,6 +58,9 @@ const composerTextarea = ref<HTMLTextAreaElement>()
 let activeSessionId = ''
 let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
+// The identity used to SEND an invite from this session — same private key
+// as everything else in onMounted, just held onto for inviteByKey().
+let ownPrivateKey: CryptoKey | null = null
 // The identity used to SEND: a guest's one-off key, or an account's real
 // key (always — even for a migrated session, see onMounted below).
 let ownPublicKeyId = ''
@@ -134,6 +138,7 @@ onMounted(async () => {
       status.value = 'not-found'
       return
     }
+    ownPrivateKey = privateKey
 
     const ownerPub = await deriveLookupTag(privateKey, 'session-access')
     const rows = await fetchSessionAccessForOwner(ownerPub)
@@ -251,6 +256,7 @@ async function generateInvite() {
 async function toggleInvite() {
   showWarning.value = false
   showMigrate.value = false
+  showInviteByKey.value = false
   showInvite.value = !showInvite.value
   if (showInvite.value && !inviteLink.value) await generateInvite()
 }
@@ -259,6 +265,62 @@ async function copyInvite() {
   if (await copyToClipboard(inviteLink.value)) {
     copiedInvite.value = true
     setTimeout(() => (copiedInvite.value = false), 1500)
+  }
+}
+
+// Invite by key: add an existing account directly, using a public key
+// exchanged out of band (physically) rather than a shareable link — see
+// api/inviteActions.ts and lib/crypto.ts's "Pairwise discoverable secrets"
+// section for why this never involves a server-side lookup of any kind.
+const showInviteByKey = ref(false)
+const inviteByKeyInput = ref('')
+const invitingByKey = ref(false)
+const inviteByKeyError = ref('')
+const lastInviteId = ref<string | null>(null)
+const cancelingInvite = ref(false)
+
+function toggleInviteByKey() {
+  showInvite.value = false
+  showWarning.value = false
+  showMigrate.value = false
+  showInviteByKey.value = !showInviteByKey.value
+  inviteByKeyError.value = ''
+}
+
+async function sendInviteByKey() {
+  if (!ownPrivateKey || !sessionKeyJwk) return
+  const pasted = inviteByKeyInput.value.trim()
+  if (!pasted) return
+
+  invitingByKey.value = true
+  inviteByKeyError.value = ''
+  try {
+    const targetPublicKeyJwk = unpackJwk(pasted)
+    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+    const created = await createSessionInvite(payload, ownPrivateKey, targetPublicKeyJwk)
+    if (!created) {
+      inviteByKeyError.value = 'Could not send the invite — try again.'
+      return
+    }
+    lastInviteId.value = created.id
+    inviteByKeyInput.value = ''
+  } catch (err) {
+    logDebug(`sendInviteByKey failed: ${err}`, 'error')
+    inviteByKeyError.value = "That doesn't look like a public key — check you copied the whole thing."
+  } finally {
+    invitingByKey.value = false
+  }
+}
+
+/** Only cancelable right after sending, in this same session view — see rejectInvite's doc comment. */
+async function cancelLastInvite() {
+  if (!lastInviteId.value) return
+  cancelingInvite.value = true
+  try {
+    await rejectInvite(lastInviteId.value)
+    lastInviteId.value = null
+  } finally {
+    cancelingInvite.value = false
   }
 }
 
@@ -272,6 +334,7 @@ const copiedPersonal = ref(false)
 function toggleWarning() {
   showInvite.value = false
   showMigrate.value = false
+  showInviteByKey.value = false
   showWarning.value = !showWarning.value
 }
 
@@ -293,6 +356,7 @@ const migrateAccountLinkInput = ref('')
 function toggleMigrate() {
   showInvite.value = false
   showWarning.value = false
+  showInviteByKey.value = false
   showMigrate.value = !showMigrate.value
   migrateError.value = ''
 }
@@ -351,6 +415,7 @@ function onDocClick(e: MouseEvent) {
     showInvite.value = false
     showWarning.value = false
     showMigrate.value = false
+    showInviteByKey.value = false
   }
 }
 onMounted(() => document.addEventListener('click', onDocClick))
@@ -366,6 +431,7 @@ function goHome() {
     <div class="top-bar">
       <button class="chip" @click="goHome">← Home</button>
       <button v-if="status === 'ready'" class="chip" @click.stop="toggleInvite">Invite</button>
+      <button v-if="status === 'ready'" class="chip" @click.stop="toggleInviteByKey">Invite by key</button>
       <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip" @click.stop="toggleMigrate">
         + Add to account
       </button>
@@ -388,6 +454,29 @@ function goHome() {
           <button :disabled="!inviteLink" @click="copyInvite">{{ copiedInvite ? 'Copied ✓' : 'Copy' }}</button>
         </div>
         <button class="new-link" :disabled="!inviteLink" @click="generateInvite">New link, for another person</button>
+      </div>
+
+      <div v-if="showInviteByKey" class="link-block">
+        <label>Invite by key</label>
+        <p class="hint">
+          Paste a public key someone shared with you directly (in person, or however you already
+          trust) to add them to this session — no link needed.
+        </p>
+        <input
+          v-model="inviteByKeyInput"
+          placeholder="Paste their public key"
+          @keydown.enter="sendInviteByKey"
+        />
+        <button class="primary" :disabled="invitingByKey || !inviteByKeyInput.trim()" @click="sendInviteByKey">
+          {{ invitingByKey ? 'Sending…' : 'Send invite' }}
+        </button>
+        <p v-if="inviteByKeyError" class="error">{{ inviteByKeyError }}</p>
+        <div v-if="lastInviteId" class="hint">
+          Invite sent.
+          <button class="new-link" :disabled="cancelingInvite" @click="cancelLastInvite">
+            {{ cancelingInvite ? 'Canceling…' : 'Cancel it' }}
+          </button>
+        </div>
       </div>
 
       <div v-if="showWarning" class="link-block warning-block">

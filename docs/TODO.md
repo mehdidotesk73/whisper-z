@@ -53,39 +53,38 @@ design described above. See "An account can migrate a guest session it already h
 displayed sender name is resolved live", and "`session_participants` is keyed by plaintext
 `session_id`" in `docs/system-design.md` §3.
 
+**Stage D: multi-participant invites** (v0.7.0) — verified/polished the existing link-based join for
+3+ people (nothing capped participant count to begin with); session list now sorts by latest-message
+time instead of the originally-planned grouped-by-participant view; added `session_invites` — add an
+existing account by a public key exchanged **out of band** (physically), not looked up by username,
+since a server-side lookup would itself be an observable event correlatable to whatever the inviter
+does next. Uses a pairwise ECDH secret (`derivePairwiseSecret`/`derivePairwiseTag`/`derivePairwiseKey`,
+`src/lib/crypto.ts`) so both sides independently derive an identical, indexable tag with no ephemeral
+key and no lookup — a database dump sees only opaque `{tag, ciphertext}` rows. Accepting an invite is
+exactly `joinExistingSession`; rejecting/undoing is a delete, client-checked only (see
+`docs/system-design.md` §3's "Deletion is client-checked only" for why that's an accepted, pre-existing
+gap, not a new one) — an inviter's "Undo" only works while the invite is still in memory from just
+having sent it, not a real cancel, since the row has no owner reference a later visit could
+reconstruct. Also shipped: a "Log in" option on the logged-out home (`extractAccountKey`, accepts a
+full link on any origin or a bare key — fixed a real regression this surfaced, where every key created
+before `deriveBits` was added to `generateKeyPair` failed to import at all); "Adopt guest account"
+(`adoptGuestIdentity`, `src/api/sessionActions.ts`) on `AccountHome.vue`'s **Account** menu —
+account-level, not tied to any open session; a per-session "Logged in as `<username>`" aliases view on
+`SessionView.vue`'s account-backed route, scoped to the currently-open session on purpose (see "Why
+there's no account-wide list of my aliases" in `docs/system-design.md` §3); and a UI pass moving
+Invite/invite-by-key/aliases/my-key/adopt-account into a shared `Modal.vue` overlay, with Invite and
+Account each collapsed into one `MenuButton.vue` menu. `MenuButton.vue` and `useOutsideClick.ts`
+(`src/lib/`) exist because the Account and Invite menus first duplicated open/close/outside-click
+logic separately, and only one copy actually worked reliably; extracting one shared implementation
+also surfaced and fixed a real mobile Safari ghost-click bug (a synthesized trailing `click`, after
+the tapped menu item was removed from the DOM, was being read as "clicked outside" and closing the
+modal the same tap had just opened) — see `docs/experience.md`'s v0.7.0 entry for the full
+root-cause writeup.
+
 ## Next (Current Sprint)
 
 Continuing the session-model rebuild, in order:
 
-- [ ] **Stage D** — real multi-participant support: verified/polished the existing link-based join
-      for 3+ people (nothing capped participant count to begin with); session list now sorts by
-      latest-message time instead of the originally-planned grouped-by-participant view; added
-      `session_invites` — add an existing account by a public key exchanged **out of band**
-      (physically), not looked up by username, since a server-side lookup would itself be an
-      observable event correlatable to whatever the inviter does next. Uses a pairwise ECDH secret
-      (`derivePairwiseSecret`/`derivePairwiseTag`/`derivePairwiseKey`, `src/lib/crypto.ts`) so both
-      sides independently derive an identical, indexable tag with no ephemeral key and no lookup —
-      a database dump sees only opaque `{tag, ciphertext}` rows. Accepting an invite is exactly
-      `joinExistingSession`; rejecting/undoing is a delete, client-checked only (see
-      `docs/system-design.md` §3's "Deletion is client-checked only" for why that's an accepted,
-      pre-existing gap, not a new one) — an inviter's "Undo" only works while the invite is still
-      in memory from just having sent it, not a real cancel, since the row has no owner reference a
-      later visit could reconstruct. The originally-planned `accepted`-flag/view-only-enforcement
-      idea was dropped along with username-based invites — it only existed to gate consent for
-      being added without acting, and every real join path already requires an affirmative action
-      (a link click, or accepting an invite) that already is that consent. Also added: a "Log in"
-      option on the logged-out home (`extractAccountKey`, accepts a full link on any origin or a
-      bare key — fixed a real regression this surfaced, where every key created before `deriveBits`
-      was added to `generateKeyPair` failed to import at all, see `docs/experience.md`); "Adopt guest
-      account" (`adoptGuestIdentity`, `src/api/sessionActions.ts`) on `AccountHome.vue`'s **Account**
-      menu — account-level, not tied to any open session, since a guest identity's own single
-      `session_access` row is enough to find which session it belongs to — plus a per-session
-      "Logged in as `<username>`" aliases view on `SessionView.vue`'s account-backed route, scoped to
-      the currently-open session on purpose — see "Why there's no account-wide list of my aliases" in
-      `docs/system-design.md` §3. UI pass after live testing: Invite/invite-by-key/aliases/my-key/
-      adopt-account all moved from inline-expanding panels into a shared `Modal.vue` overlay,
-      "Invite" collapsed into one menu button ("By join link"/"By public key"), and top-bar buttons
-      got a ghost (outline, no fill) variant for lower-emphasis actions like Home/Log out.
 - [ ] **Stage E** — rename/remove a session from your list, plus pin/favorite a session (deferred
       here from Stage D's list-sort work: sessions with a pin would sort above latest-activity
       order, not yet designed). Also carries a proposed auto-naming design (from live testing, after

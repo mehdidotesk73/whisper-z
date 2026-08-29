@@ -121,6 +121,48 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.7.0 — 2026-08-29 (Stage D: multi-participant invites)
+- **Rejected, before building anything:** an "invite by username" design that resolved a typed
+  username to a public key server-side. Caught in review: the resolution query is itself an
+  observable event, correlatable by timing to whatever the inviter does immediately afterward — a
+  live traffic observer (not even a database dump) could link "X looked up Y" to "X wrote
+  something," no matter how anonymous the row written afterward looks. Every other join path in this
+  app avoids this by construction (a link or private key is a secret both sides already hold, with
+  nothing to resolve); this was the one design that would have introduced a resolve-then-act step
+- **Added:** `session_invites` instead — the inviter already has the invitee's public key, obtained
+  physically/out of band (`AccountHome.vue`'s "My public key" reveals a copyable blob for exactly
+  this). `derivePairwiseSecret`/`derivePairwiseTag`/`derivePairwiseKey` (`src/lib/crypto.ts`) exploit
+  ECDH's symmetry — `ECDH(A_priv, B_pub) === ECDH(B_priv, A_pub)` — so both sides independently
+  derive an identical secret with no ephemeral keypair and no lookup; `checkForInvites`
+  (`src/api/inviteActions.ts`) tries every other account's public key from `accounts` and finds a
+  match with one indexed query, never a full scan. A database dump sees only opaque
+  `{tag, ciphertext}` rows — computing a matching tag needs one of the two private keys.
+  `generateKeyPair`/`importPrivateKey` gained `deriveBits` usage alongside the existing `deriveKey`
+  for this. Verified with a standalone script (8 checks) before wiring in: DH reciprocity, a full
+  round trip, a non-matching third party's candidate check correctly fails, an uninvolved party can't
+  reproduce the tag or decrypt without either private key
+- **Added:** accepting an invite is exactly `joinExistingSession` — an invite only ever needed to
+  deliver a `JoinPayload` privately, so no new join logic exists. Rejecting/canceling is a plain
+  delete, left client-checked (see "Deletion is client-checked only" in `docs/system-design.md` §3
+  for why that's an accepted, pre-existing gap every table already has, not a new one)
+- **Changed:** session list now sorts by latest-message time (`fetchLatestMessageTimes`,
+  `src/api/sessions.ts`, reading plaintext `messages.created_at`) instead of the originally-planned
+  grouped-by-participant view; pin/favorite deferred to Stage E
+- **Dropped:** the originally-planned `accepted` flag / view-only enforcement for a newly-invited
+  participant — it only existed to gate consent for being added without acting, and once invites are
+  never delivered without an explicit accept step, every real join path already requires the
+  affirmative action that consent needs
+- **Designed but explicitly not built this phase** (see `docs/TODO.md`'s "Code" section for the full
+  writeup): an admin/capability model where a session's admin rights are a second, distinct private
+  key rather than a server-checked flag — forged claims are simply inert, since they can't hand
+  anyone a real key, which eliminates the need for an RLS lock-down or Edge Function specifically for
+  capability verification. Revocation isn't solved by this (admin-forever, deliberately, for now).
+  Also considered and rejected as disproportionate for this app's scale: anchoring a hash-chained
+  history on an external blockchain for tamper evidence — the cheaper, sufficient version is
+  participants cross-checking a hash with each other directly, no external chain needed
+- See "Session list sorted by latest activity" and "Adding an existing account to a session by
+  public key" in `docs/system-design.md` §3 for the full design
+
 ### v0.6.0 — 2026-08-28 (Stage C: guest → account migration)
 - **Added:** `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) — adds an account's own
   `session_access` row to a session it currently only holds as a guest, plus a new

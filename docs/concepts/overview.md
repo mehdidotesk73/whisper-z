@@ -12,6 +12,10 @@ session opens immediately: you can start typing right away, even before anyone e
 From inside the session:
 - **Invite** reveals a link you can send to someone so they can join. It works once and expires
   after 10 minutes — tap **New link, for another person** to invite someone else.
+- **Invite by key** adds someone directly if they already have an account and you have their public
+  key — get it from them in person, or however you already trust each other (their account's **My
+  public key** shows a copyable version). No link to send; they'll see it waiting for them next time
+  they open their account. You can cancel it right after sending, while it's still unaccepted.
 - **+ Add to account** (only shown if you joined as a guest) adds this session to an account's chat
   list — either your own, if you're signed in, or one you sign into on the spot by pasting its
   account link. Nothing about the session or its history changes; this just gives you a second way
@@ -38,7 +42,14 @@ An account keeps a chat list, so you don't need to save a personal link for ever
 is the only way to sign back in on another device or after clearing your browser; there's still no
 password and no recovery. Once signed in, starting or joining a session adds it to your list
 automatically, and the personal-link Warning no longer applies to sessions opened from an account,
-since the account link already covers that.
+since the account link already covers that. Your chat list is sorted by whichever session had a
+message most recently.
+
+**My public key**, shown on your account's home screen, is a copyable blob of your public key — safe
+to share openly with anyone. Give it to someone in person (or however you already trust them) so
+they can use **Invite by key** to add you to a session directly, no link required. If someone's sent
+you one, you'll see it as a pending invite on your account home the next time you open it — **Accept**
+joins the session immediately, **Reject** just discards it.
 
 ## Chatting
 
@@ -59,11 +70,10 @@ short random name (like "BlueFox") instead of a real identity.
 - **Metadata isn't fully hidden.** That a session exists and roughly when messages were sent are
   visible at the database level even though the content and membership aren't.
 - **This doesn't (yet) protect against someone intercepting the very first exchange of keys**, and
-  doesn't (yet) stop someone with write access to the database from tampering with a record in ways
-  a legitimate participant's app would simply reject on sight — there's no server-side check
-  rejecting a forged record before it's stored. For a casual private conversation this is fine; it
-  isn't the same guarantee as apps that let you verify a "safety number" with the other person out
-  of band.
+  doesn't (yet) stop someone with write access to the database from tampering with, or deleting, a
+  record — there's no server-side check rejecting a forged record before it's stored, or verifying
+  who's allowed to remove one. For a casual private conversation this is fine; it isn't the same
+  guarantee as apps that let you verify a "safety number" with the other person out of band.
 
 ## Common Questions
 

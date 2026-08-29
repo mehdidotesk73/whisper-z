@@ -1,14 +1,6 @@
 <script setup lang="ts">
-import { watch } from 'vue'
-import { logDebug } from '../debug'
-
-const props = defineProps<{ open: boolean; title?: string }>()
+defineProps<{ open: boolean; title?: string }>()
 const emit = defineEmits<{ close: [] }>()
-
-watch(
-  () => props.open,
-  (v) => logDebug(`Modal[${props.title ?? '(untitled)'}]: open=${v}`),
-)
 </script>
 
 <template>

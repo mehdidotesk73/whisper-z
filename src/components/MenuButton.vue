@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { logDebug } from '../debug'
 import { useOutsideClick } from '../lib/useOutsideClick'
 
 // A trigger button that opens a small options popover. Selecting an option
@@ -11,25 +10,21 @@ import { useOutsideClick } from '../lib/useOutsideClick'
 // Outside-click detection is scoped to this component's own root, not a
 // page-wide area, so it can never race with unrelated panel-closing logic
 // elsewhere on the page.
-const props = defineProps<{ label: string; tone?: string }>()
+defineProps<{ label: string; tone?: string }>()
 
 const open = ref(false)
 const root = ref<HTMLElement>()
 
 function toggle() {
   open.value = !open.value
-  logDebug(`MenuButton[${props.label}]: toggle -> open=${open.value}`)
 }
 
 function select(action: () => void) {
-  logDebug(`MenuButton[${props.label}]: option selected, closing and running action`)
   open.value = false
   action()
 }
 
 useOutsideClick(root, () => {
-  if (!open.value) return
-  logDebug(`MenuButton[${props.label}]: outside click, closing`)
   open.value = false
 })
 </script>

@@ -49,6 +49,12 @@ export function canonicalPublicKeyId(jwk: JsonWebKey): string {
   return `${jwk.x}.${jwk.y}`
 }
 
+/** Reverses canonicalPublicKeyId — reconstructs an importable public JWK from an accounts.public_key id string. */
+export function publicKeyFromCanonicalId(id: string): JsonWebKey {
+  const [x, y] = id.split('.')
+  return { kty: 'EC', crv: 'P-256', x, y, ext: true, key_ops: [] }
+}
+
 export async function deriveSharedKey(privateKey: CryptoKey, publicKey: CryptoKey): Promise<CryptoKey> {
   return crypto.subtle.deriveKey({ name: 'ECDH', public: publicKey }, privateKey, AES_PARAMS, false, [
     'encrypt',

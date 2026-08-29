@@ -49,3 +49,21 @@ export async function fetchAccountsByPublicKeys(publicKeyIds: string[]): Promise
   }
   return data as AccountRow[]
 }
+
+/**
+ * Every account, for the invitee side of the session-invite mechanism: to
+ * find a pending invite, an account must derive a pairwise tag against each
+ * candidate it might be a match for (see lib/crypto.ts's "Pairwise
+ * discoverable secrets" section) — this is the one place that candidate
+ * list comes from. Safe because accounts.public_key is already the one
+ * intentionally public, searchable value in this schema.
+ */
+export async function fetchAllAccounts(): Promise<AccountRow[]> {
+  const { data, error } = await supabase.from('accounts').select('*')
+
+  if (error) {
+    logDebug(`fetchAllAccounts failed: ${error.message}`, 'error')
+    return []
+  }
+  return data as AccountRow[]
+}

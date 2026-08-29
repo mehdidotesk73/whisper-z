@@ -16,7 +16,9 @@ import {
 } from '../lib/crypto'
 import {
   fetchSessionAccessForOwner,
-  fetchMessages,
+  fetchMessagesInRange,
+  hasMessagesBefore,
+  MESSAGE_PAGE_DAYS,
   sendMessage,
   subscribeMessages,
   createJoinAccess,
@@ -57,6 +59,17 @@ const sending = ref(false)
 const migrated = ref(false) // this guest session already has an account attached to it
 const scrollAnchor = ref<HTMLElement>()
 const composerTextarea = ref<HTMLTextAreaElement>()
+const threadEl = ref<HTMLElement>()
+
+// Message history loads one MESSAGE_PAGE_DAYS-wide window at a time rather
+// than all at once — windowStart is the earliest instant currently loaded;
+// "Load more" shifts it back by another window. hasMoreHistory is only ever
+// set from an explicit existence check (see api/sessions.ts's
+// hasMessagesBefore), never assumed, so the button simply doesn't appear
+// once there's nothing earlier to fetch.
+const windowStart = ref('')
+const hasMoreHistory = ref(false)
+const loadingMore = ref(false)
 
 let activeSessionId = ''
 let sessionKey: CryptoKey | null = null
@@ -107,22 +120,58 @@ async function scrollToBottom() {
   scrollAnchor.value?.scrollIntoView({ block: 'end' })
 }
 
-async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string }) {
-  if (seenMessageIds.has(row.id) || !sessionKey) return
+async function decodeMessage(row: { id: string; ciphertext: string; iv: string }): Promise<RenderedMessage | null> {
+  if (seenMessageIds.has(row.id) || !sessionKey) return null
   seenMessageIds.add(row.id)
   try {
     const json = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
     const plain = JSON.parse(json) as DecodedMessage
     resolveName(plain.sender)
-    messages.value.push({
-      id: row.id,
-      mine: myKeys.has(plain.sender),
-      sender: plain.sender,
-      text: plain.text,
-    })
-    scrollToBottom()
+    return { id: row.id, mine: myKeys.has(plain.sender), sender: plain.sender, text: plain.text }
   } catch (err) {
     logDebug(`Could not decrypt message ${row.id}: ${err}`, 'warn')
+    return null
+  }
+}
+
+async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string }) {
+  const decoded = await decodeMessage(row)
+  if (!decoded) return
+  messages.value.push(decoded)
+  scrollToBottom()
+}
+
+/**
+ * Older history, loaded on demand — prepended above what's already shown
+ * instead of appended, and the scroll position is adjusted by exactly the
+ * height the prepended content added, so whatever the user was already
+ * looking at stays put instead of jumping as the thread grows above it.
+ */
+async function loadMore() {
+  if (loadingMore.value || !hasMoreHistory.value || !sessionKey) return
+  loadingMore.value = true
+  try {
+    const el = threadEl.value
+    const scrollHeightBefore = el?.scrollHeight ?? 0
+    const scrollTopBefore = el?.scrollTop ?? 0
+
+    const newWindowStart = new Date(
+      new Date(windowStart.value).getTime() - MESSAGE_PAGE_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString()
+    const older = await fetchMessagesInRange(activeSessionId, newWindowStart, windowStart.value)
+    const decoded: RenderedMessage[] = []
+    for (const row of older) {
+      const msg = await decodeMessage(row)
+      if (msg) decoded.push(msg)
+    }
+    messages.value.unshift(...decoded)
+    windowStart.value = newWindowStart
+    hasMoreHistory.value = await hasMessagesBefore(activeSessionId, newWindowStart)
+
+    await nextTick()
+    if (el) el.scrollTop = scrollTopBefore + (el.scrollHeight - scrollHeightBefore)
+  } finally {
+    loadingMore.value = false
   }
 }
 
@@ -193,8 +242,10 @@ onMounted(async () => {
       migrated.value = await isIdentityMerged(currentAccount.value, activeSessionId, ownPublicKeyId)
     }
 
-    const existing = await fetchMessages(activeSessionId)
+    windowStart.value = new Date(Date.now() - MESSAGE_PAGE_DAYS * 24 * 60 * 60 * 1000).toISOString()
+    const existing = await fetchMessagesInRange(activeSessionId, windowStart.value, null)
     for (const row of existing) await decodeAndAppend(row)
+    hasMoreHistory.value = await hasMessagesBefore(activeSessionId, windowStart.value)
 
     status.value = 'ready'
     messageChannel = subscribeMessages(activeSessionId, decodeAndAppend)
@@ -578,7 +629,12 @@ function goHome() {
     </p>
 
     <template v-else>
-      <ul class="thread">
+      <ul ref="threadEl" class="thread">
+        <li v-if="hasMoreHistory" class="load-more-row">
+          <button class="load-more" :disabled="loadingMore" @click="loadMore">
+            {{ loadingMore ? 'Loading…' : 'Load more' }}
+          </button>
+        </li>
         <li v-if="!messages.length" class="empty">No messages yet — say hello.</li>
         <li v-for="m in messages" :key="m.id" :class="['bubble', m.mine ? 'mine' : 'theirs']">
           <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
@@ -825,6 +881,26 @@ function goHome() {
   color: var(--text-muted);
   text-align: center;
   padding: 1rem 0;
+}
+
+.load-more-row {
+  display: flex;
+  justify-content: center;
+  padding: 0.25rem 0;
+}
+
+.load-more {
+  padding: 0.35rem 0.8rem;
+  min-height: 36px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.load-more:disabled {
+  opacity: 0.6;
 }
 
 .bubble {

@@ -463,6 +463,26 @@ honest caveats as before, now joined by "an active database attacker with write 
 tamper with a row in ways an honest client would reject, but nothing here stops that at the server;
 see `docs/experience.md` for why that's deliberately out of scope for now."
 
+**Message history loads a window at a time, not all at once.** `SessionView.vue` used to fetch every
+`messages` row for a session on open — fine for a young session, but a cost that only grows, paid on
+every open, for one that's been running a long time. `fetchMessagesInRange(sessionId, sinceISO,
+beforeISO)` (`src/api/sessions.ts`) fetches a `MESSAGE_PAGE_DAYS`-wide slice (7 days) using the same
+plaintext `created_at` column the latest-activity sort already reads — no new metadata exposed, just a
+narrower query. Opening a session loads `[now - 7d, now]`; a **Load more** button, shown at the top of
+the thread, shifts the window back by another 7 days each time (`[start - 7d, start)`, tiling exactly
+against the previous window with no gap or overlap since one edge is `gte` and the other `lt` on the
+same boundary value). Older messages are prepended rather than appended, and the scroll position is
+adjusted by exactly the height the prepended content added (`scrollTop += scrollHeightAfter -
+scrollHeightBefore`), so what the user was already reading doesn't jump.
+
+Whether to show **Load more** at all is decided by `hasMessagesBefore(sessionId, beforeISO)` — a
+real existence check (`select id ... limit 1`), run once after the initial load and again after each
+load-more, rather than assumed optimistically from whether the last fetch happened to fill a window.
+An optimistic version (always show the button, let an empty fetch be the "no more" signal) was
+considered and rejected: it trades one indexed existence check for an occasional dead tap at the very
+start of a session's history, but a real check is cheap enough here that there's no reason to accept
+the imprecision.
+
 ## §4 — Shared Logic (lib/)
 
 Pure functions over already-fetched data. These recompute instantly, no refetch. Example:

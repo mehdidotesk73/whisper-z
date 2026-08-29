@@ -233,18 +233,49 @@ export interface MessageRow {
   created_at: string
 }
 
-export async function fetchMessages(sessionId: string): Promise<MessageRow[]> {
-  const { data, error } = await supabase
-    .from('messages')
-    .select('*')
-    .eq('session_id', sessionId)
-    .order('created_at', { ascending: true })
+// Loaded a window at a time (see MESSAGE_PAGE_DAYS) rather than the whole
+// history at once — a session running for months would otherwise mean
+// decrypting and rendering every message in it just to open the thread.
+
+export const MESSAGE_PAGE_DAYS = 7
+
+/**
+ * `sinceISO` to `beforeISO` (or to now, if `beforeISO` is omitted — the
+ * initial load's upper edge is simply "whatever exists right now," with
+ * anything sent after that arriving through the realtime subscription
+ * instead). `beforeISO` is only ever the previous window's own `sinceISO`,
+ * so windows tile with no gap and no overlap.
+ */
+export async function fetchMessagesInRange(
+  sessionId: string,
+  sinceISO: string,
+  beforeISO: string | null,
+): Promise<MessageRow[]> {
+  let query = supabase.from('messages').select('*').eq('session_id', sessionId).gte('created_at', sinceISO)
+  if (beforeISO) query = query.lt('created_at', beforeISO)
+  const { data, error } = await query.order('created_at', { ascending: true })
 
   if (error) {
-    logDebug(`fetchMessages failed: ${error.message}`, 'error')
+    logDebug(`fetchMessagesInRange failed: ${error.message}`, 'error')
     return []
   }
   return data as MessageRow[]
+}
+
+/** Existence check backing the "Load more" button — cheap since it's a single indexed row, not a count. */
+export async function hasMessagesBefore(sessionId: string, beforeISO: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('id')
+    .eq('session_id', sessionId)
+    .lt('created_at', beforeISO)
+    .limit(1)
+
+  if (error) {
+    logDebug(`hasMessagesBefore failed: ${error.message}`, 'error')
+    return false
+  }
+  return (data?.length ?? 0) > 0
 }
 
 export async function sendMessage(sessionId: string, ciphertext: string, iv: string): Promise<boolean> {

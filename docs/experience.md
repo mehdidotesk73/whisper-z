@@ -121,6 +121,22 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.8.0 — 2026-08-29 (message history pagination)
+- **Added:** `SessionView.vue` used to fetch every `messages` row for a session on open, decrypting
+  and rendering the entire history no matter its age — fine for a young session, a cost that only
+  grows for an old one. `fetchMessagesInRange(sessionId, sinceISO, beforeISO)`
+  (`src/api/sessions.ts`) now loads a `MESSAGE_PAGE_DAYS`-wide window (7 days) at a time, using the
+  same plaintext `created_at` column the latest-activity sort already reads. A **Load more** button
+  at the top of the thread shifts the window back another 7 days on tap, prepending the older batch
+  and adjusting `scrollTop` by exactly the height that batch added, so the messages already on screen
+  don't visibly jump
+- **Considered and rejected:** showing "Load more" optimistically (always render it, treat an empty
+  fetch as "no more") instead of a real existence check. It saves one indexed query per load, but
+  costs an occasional dead tap right at the start of a session's history — not worth it when the
+  check itself is a `select id ... limit 1`, as cheap as an existence check gets.  `hasMessagesBefore`
+  runs once after the initial load and once after each load-more instead
+- See "Message history loads a window at a time" in `docs/system-design.md` §3
+
 ### v0.7.0 — 2026-08-29 (Stage D: multi-participant invites)
 - **Rejected, before building anything:** an "invite by username" design that resolved a typed
   username to a public key server-side. Caught in review: the resolution query is itself an

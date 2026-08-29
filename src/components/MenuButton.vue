@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref } from 'vue'
 import { logDebug } from '../debug'
+import { useOutsideClick } from '../lib/useOutsideClick'
 
 // A trigger button that opens a small options popover. Selecting an option
 // always closes the popover and then runs that option's action — the two
@@ -26,15 +27,11 @@ function select(action: () => void) {
   action()
 }
 
-function onDocClick(e: MouseEvent) {
-  if (open.value && root.value && !root.value.contains(e.target as Node)) {
-    logDebug(`MenuButton[${props.label}]: outside click, closing`)
-    open.value = false
-  }
-}
-
-onMounted(() => document.addEventListener('click', onDocClick))
-onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
+useOutsideClick(root, () => {
+  if (!open.value) return
+  logDebug(`MenuButton[${props.label}]: outside click, closing`)
+  open.value = false
+})
 </script>
 
 <template>

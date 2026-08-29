@@ -490,7 +490,12 @@ src/components/
                       each option a `select(action)` that closes the popover and runs the action
                       together, and outside-click detection is scoped to the component's own root
                       element) — both AccountHome's Account menu and SessionView's Invite menu use
-                      this instead of separately hand-rolling the same open/close/outside-click logic
+                      this instead of separately hand-rolling the same open/close/outside-click logic.
+                      Its outside-click detection, and SessionView's panel-closing, both go through
+                      lib/useOutsideClick.ts — a click alone isn't enough to count as "outside," since
+                      mobile Safari can synthesize a trailing ghost click after the tapped element is
+                      removed from the DOM; requiring the mousedown to also have started outside
+                      filters that out
   HelpModal.vue       renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
   SessionHome.vue     logged-out home: "Start a session", paste-a-link box, "Create an account", and
                       "Log in" (accepts a full account link, any origin, or just the bare key)

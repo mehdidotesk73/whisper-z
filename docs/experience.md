@@ -223,6 +223,18 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   `select(action)` via scoped slot that closes the popover and runs the action together, always in
   that order. Both menus now use it; there's exactly one implementation of "menu button" behavior to
   get right instead of two
+- **Root-caused the Invite ▾ menu bug via on-device logs, after static reasoning didn't find it:**
+  tapping a menu option opened its modal correctly, then a *second*, separate click event fired a
+  moment later, was seen by `SessionView`'s outside-click handler as landing outside `panelArea`, and
+  closed everything the first click had just opened — all fast enough to look like tapping did
+  nothing. This is a known mobile Safari behavior: when the tapped element is removed from the DOM as
+  part of handling its own click (here, the menu item disappearing as `MenuButton` closes its
+  popover), the browser can synthesize a trailing `click` afterward, retargeted to whatever's now
+  under that point — in this case, off `panelArea` entirely. Fixed with `useOutsideClick`
+  (`src/lib/useOutsideClick.ts`): an outside click only counts if its `mousedown` *also* started
+  outside, since a ghost click has no mousedown of its own — the real one already fired against the
+  original element before anything was removed. `MenuButton` and `SessionView`'s panel-closing both
+  use it now instead of a bare `document` `click` listener
 - **Restyled:** the ghost tag buttons (Home, Log out, Account ▾, Invite ▾) were rendering with much
   more padding/height than their small font size implied — closer to the solid `.chip` buttons'
   footprint than a genuinely small tag/pill. Shrunk padding and min-height and switched to a fully

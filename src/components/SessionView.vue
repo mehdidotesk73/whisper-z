@@ -32,6 +32,7 @@ import { isIdentityMerged, migrateGuestSessionToAccount } from '../api/sessionAc
 import { createSessionInvite, rejectInvite } from '../api/inviteActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
+import { useOutsideClick } from '../lib/useOutsideClick'
 import Modal from './Modal.vue'
 import MenuButton from './MenuButton.vue'
 import type { RealtimeChannel } from '@supabase/supabase-js'
@@ -468,14 +469,10 @@ function closeAllPanels() {
   showAliases.value = false
 }
 
-function onDocClick(e: MouseEvent) {
-  if (panelArea.value && !panelArea.value.contains(e.target as Node)) {
-    logDebug('SessionView: outside click, closing panels')
-    closeAllPanels()
-  }
-}
-onMounted(() => document.addEventListener('click', onDocClick))
-onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
+useOutsideClick(panelArea, () => {
+  logDebug('SessionView: outside click, closing panels')
+  closeAllPanels()
+})
 
 function goHome() {
   navigate(homeHash)

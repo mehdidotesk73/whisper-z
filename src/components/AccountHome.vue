@@ -9,6 +9,7 @@ import { copyToClipboard } from '../lib/clipboard'
 import { mySessionHash, navigate, homeHash, parseHash, extractHash } from '../lib/route'
 import { logDebug } from '../debug'
 import Modal from './Modal.vue'
+import MenuButton from './MenuButton.vue'
 
 const items = ref<SessionListItem[]>([])
 const loading = ref(true)
@@ -55,23 +56,18 @@ onMounted(async () => {
 })
 
 // Account menu: a small popover with "My public key" and "Adopt guest
-// account" — both open in a modal rather than an inline panel.
-const showAccountMenu = ref(false)
+// account" — both open in a modal rather than an inline panel. The popover
+// itself is MenuButton (see components/MenuButton.vue) — it owns closing
+// itself and running the selected option's action together.
 const showMyKeyModal = ref(false)
 const showAdoptModal = ref(false)
 const copiedMyKey = ref(false)
 
-function toggleAccountMenu() {
-  showAccountMenu.value = !showAccountMenu.value
-}
-
 function openMyKeyModal() {
-  showAccountMenu.value = false
   showMyKeyModal.value = true
 }
 
 function openAdoptModal() {
-  showAccountMenu.value = false
   adoptError.value = ''
   showAdoptModal.value = true
 }
@@ -178,28 +174,19 @@ function onLogout() {
   navigate(homeHash)
 }
 
-const accountMenuArea = ref<HTMLElement>()
-function onDocClick(e: MouseEvent) {
-  if (accountMenuArea.value && !accountMenuArea.value.contains(e.target as Node)) {
-    showAccountMenu.value = false
-  }
-}
-onMounted(() => document.addEventListener('click', onDocClick))
-onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 </script>
 
 <template>
   <div class="account-home">
     <div class="top-row">
       <p class="whoami">Signed in as <strong>{{ currentAccount?.account.username }}</strong></p>
-      <div ref="accountMenuArea" class="top-row-actions">
-        <div class="menu-wrap">
-          <button class="chip-ghost tone-blue" @click.stop="toggleAccountMenu">Account ▾</button>
-          <div v-if="showAccountMenu" class="menu-pop">
-            <button class="menu-item" @click="openMyKeyModal">My public key</button>
-            <button class="menu-item" @click="openAdoptModal">Adopt guest account</button>
-          </div>
-        </div>
+      <div class="top-row-actions">
+        <MenuButton label="Account ▾" tone="tone-blue">
+          <template #default="{ select }">
+            <button class="menu-item" @click="select(openMyKeyModal)">My public key</button>
+            <button class="menu-item" @click="select(openAdoptModal)">Adopt guest account</button>
+          </template>
+        </MenuButton>
         <button class="chip-ghost tone-danger" @click="onLogout">Log out</button>
       </div>
     </div>
@@ -329,42 +316,19 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 }
 
 .chip-ghost {
-  padding: 0.35rem 0.7rem;
-  min-height: 40px;
+  padding: 0.28rem 0.65rem;
+  min-height: 30px;
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 0.4rem;
-  font-size: 0.8rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
   font-weight: 600;
-}
-
-.chip-ghost.tone-blue {
-  border-color: var(--accent-blue);
-  color: var(--accent-blue);
+  line-height: 1.2;
 }
 
 .chip-ghost.tone-danger {
   border-color: var(--danger);
   color: var(--danger);
-}
-
-.menu-wrap {
-  position: relative;
-}
-
-.menu-pop {
-  position: absolute;
-  top: calc(100% + 0.3rem);
-  right: 0;
-  z-index: 80;
-  display: flex;
-  flex-direction: column;
-  min-width: 10rem;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 0.5rem;
-  overflow: hidden;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
 }
 
 .menu-item {

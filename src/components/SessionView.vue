@@ -33,6 +33,7 @@ import { createSessionInvite, rejectInvite } from '../api/inviteActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
 import Modal from './Modal.vue'
+import MenuButton from './MenuButton.vue'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
 // Either a guest personal-link key, or an account's session id (looked up
@@ -427,22 +428,17 @@ function toggleAliases() {
 }
 
 // Invite menu: a small popover offering the two ways to invite, each
-// opening its panel in a modal rather than inline.
-const showInviteMenu = ref(false)
-
-function toggleInviteMenu() {
-  showInviteMenu.value = !showInviteMenu.value
-}
-
+// opening its panel in a modal rather than inline. The popover itself is
+// MenuButton (see components/MenuButton.vue) — it owns closing itself and
+// running the selected option's action together, so there's nothing here to
+// get out of sync.
 async function openInviteModal() {
-  showInviteMenu.value = false
   closeAllPanels()
   showInvite.value = true
   if (!inviteLink.value) await generateInvite()
 }
 
 function openInviteByKeyModal() {
-  showInviteMenu.value = false
   closeAllPanels()
   showInviteByKey.value = true
   inviteByKeyError.value = ''
@@ -454,7 +450,6 @@ function closeAllPanels() {
   showWarning.value = false
   showMigrate.value = false
   showAliases.value = false
-  showInviteMenu.value = false
 }
 
 function onDocClick(e: MouseEvent) {
@@ -483,13 +478,12 @@ function goHome() {
         >
           Signed in as <strong>{{ currentAccount.account.username }}</strong>
         </span>
-        <div v-if="status === 'ready'" class="menu-wrap invite-menu-wrap">
-          <button class="chip-ghost tone-blue" @click.stop="toggleInviteMenu">Invite ▾</button>
-          <div v-if="showInviteMenu" class="menu-pop">
-            <button class="menu-item" @click="openInviteModal">By join link</button>
-            <button class="menu-item" @click="openInviteByKeyModal">By public key</button>
-          </div>
-        </div>
+        <MenuButton v-if="status === 'ready'" label="Invite ▾" tone="tone-blue" class="invite-menu-wrap">
+          <template #default="{ select }">
+            <button class="menu-item" @click="select(openInviteModal)">By join link</button>
+            <button class="menu-item" @click="select(openInviteByKeyModal)">By public key</button>
+          </template>
+        </MenuButton>
       </div>
 
       <div class="top-bar">
@@ -663,45 +657,22 @@ function goHome() {
 }
 
 .chip-ghost {
-  padding: 0.35rem 0.7rem;
-  min-height: 40px;
+  padding: 0.28rem 0.65rem;
+  min-height: 30px;
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 0.4rem;
-  font-size: 0.8rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
   font-weight: 600;
+  line-height: 1.2;
 }
 
 .chip-ghost.tone-neutral {
   color: var(--text-muted);
 }
 
-.chip-ghost.tone-blue {
-  border-color: var(--accent-blue);
-  color: var(--accent-blue);
-}
-
-.menu-wrap {
-  position: relative;
-}
-
 .invite-menu-wrap {
   margin-left: auto;
-}
-
-.menu-pop {
-  position: absolute;
-  top: calc(100% + 0.3rem);
-  right: 0;
-  z-index: 80;
-  display: flex;
-  flex-direction: column;
-  min-width: 10rem;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 0.5rem;
-  overflow: hidden;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
 }
 
 .menu-item {

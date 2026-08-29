@@ -486,6 +486,11 @@ src/components/
   Modal.vue           generic bottom-sheet/centered overlay (open, title, @close) — every panel that
                       used to expand inline (Invite, invite-by-key, aliases, my key, adopt account)
                       now renders inside one of these instead
+  MenuButton.vue      generic ghost-button trigger + options popover (label, tone; scoped-slot gives
+                      each option a `select(action)` that closes the popover and runs the action
+                      together, and outside-click detection is scoped to the component's own root
+                      element) — both AccountHome's Account menu and SessionView's Invite menu use
+                      this instead of separately hand-rolling the same open/close/outside-click logic
   HelpModal.vue       renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
   SessionHome.vue     logged-out home: "Start a session", paste-a-link box, "Create an account", and
                       "Log in" (accepts a full account link, any origin, or just the bare key)

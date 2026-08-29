@@ -210,6 +210,24 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   repeatedly touches this stable tag," and one moment of IP-to-identity linkage (a signup, an ISP
   log) connects backwards to everything that IP/tag ever touched. VPN/Tor is the real mitigation,
   and it's the user's choice to make, not something this app provides
+- **Fixed a real bug, found through live device testing of the menu UI pass above:** SessionView's
+  Invite ▾ menu opened and showed both options, but tapping either one did nothing — no modal
+  appeared. AccountHome's near-identical Account ▾ menu worked. The two had each hand-rolled their
+  own open/close state and their own document-level outside-click listener scoped to a large shared
+  wrapper (`panelArea`/`accountMenuArea` — the same wrapper other, unrelated panels used for their
+  own outside-click handling), so the two menus weren't actually running the same code, just
+  similar-looking code, and only one of the two copies happened to work reliably. Root-caused to
+  exactly that duplication rather than to any specific mobile Safari quirk. Fixed by extracting
+  `MenuButton.vue` — a single component that owns its own open state, does outside-click detection
+  against its own root element only (never a page-wide wrapper), and exposes each option a
+  `select(action)` via scoped slot that closes the popover and runs the action together, always in
+  that order. Both menus now use it; there's exactly one implementation of "menu button" behavior to
+  get right instead of two
+- **Restyled:** the ghost tag buttons (Home, Log out, Account ▾, Invite ▾) were rendering with much
+  more padding/height than their small font size implied — closer to the solid `.chip` buttons'
+  footprint than a genuinely small tag/pill. Shrunk padding and min-height and switched to a fully
+  rounded pill shape, matching the tight, thin-border, small-text style of a reference app's tab/toggle
+  pills the user pointed to
 - See "Session list sorted by latest activity," "Adding an existing account to a session by
   public key," and "'Adopt guest account' is the mirror of '+ Add to account'" in
   `docs/system-design.md` §3 for the full design

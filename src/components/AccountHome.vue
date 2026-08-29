@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { currentAccount, logout } from '../lib/auth'
-import { startNewSession } from '../api/sessionActions'
+import { startNewSession, adoptGuestIdentity } from '../api/sessionActions'
 import { fetchSessionList, type SessionListItem } from '../api/sessionList'
+import { checkForInvites, acceptInvite, rejectInvite, type PendingInvite } from '../api/inviteActions'
+import { exportPublicKey, packJwk } from '../lib/crypto'
+import { copyToClipboard } from '../lib/clipboard'
 import { mySessionHash, navigate, homeHash, parseHash, extractHash } from '../lib/route'
 import { logDebug } from '../debug'
+import Modal from './Modal.vue'
+import MenuButton from './MenuButton.vue'
 
 const items = ref<SessionListItem[]>([])
 const loading = ref(true)
@@ -26,6 +31,103 @@ async function loadList() {
 }
 
 onMounted(loadList)
+
+// Share-my-key + pending invites: see api/inviteActions.ts and
+// lib/crypto.ts's "Pairwise discoverable secrets" section. My public key
+// is safe to show/copy openly (it's already the one intentionally public
+// value in this schema) — someone else pastes it into their own session's
+// "Invite by key" to add me, entirely out of band, no lookup involved.
+const myPublicKeyBlob = ref('')
+const pendingInvites = ref<PendingInvite[]>([])
+const invitesLoading = ref(true)
+const respondingId = ref<string | null>(null)
+
+onMounted(async () => {
+  if (!currentAccount.value) return
+  myPublicKeyBlob.value = packJwk(await exportPublicKey(currentAccount.value.publicKey))
+  invitesLoading.value = true
+  try {
+    pendingInvites.value = await checkForInvites(currentAccount.value)
+  } catch (err) {
+    logDebug(`checkForInvites failed: ${err}`, 'error')
+  } finally {
+    invitesLoading.value = false
+  }
+})
+
+// Account menu: a small popover with "My public key" and "Adopt guest
+// account" — both open in a modal rather than an inline panel. The popover
+// itself is MenuButton (see components/MenuButton.vue) — it owns closing
+// itself and running the selected option's action together.
+const showMyKeyModal = ref(false)
+const showAdoptModal = ref(false)
+const copiedMyKey = ref(false)
+
+function openMyKeyModal() {
+  showMyKeyModal.value = true
+}
+
+function openAdoptModal() {
+  adoptError.value = ''
+  showAdoptModal.value = true
+}
+
+async function copyMyKey() {
+  if (await copyToClipboard(myPublicKeyBlob.value)) {
+    copiedMyKey.value = true
+    setTimeout(() => (copiedMyKey.value = false), 1500)
+  }
+}
+
+// Adopt a guest account: paste any guest identity's private key from
+// anywhere, and adoptGuestIdentity figures out which session it belongs to
+// itself — no need to already be viewing that session. See
+// api/sessionActions.ts's adoptGuestIdentity doc comment.
+const adoptInput = ref('')
+const adopting = ref(false)
+const adoptError = ref('')
+
+async function adoptGuestAccount() {
+  if (!currentAccount.value) return
+  const pasted = adoptInput.value.trim()
+  if (!pasted) return
+
+  adopting.value = true
+  adoptError.value = ''
+  try {
+    const ok = await adoptGuestIdentity(pasted, currentAccount.value)
+    if (!ok) {
+      adoptError.value = "Could not adopt that account — check it's a valid guest personal link or key."
+      return
+    }
+    showAdoptModal.value = false
+    adoptInput.value = ''
+    await loadList() // the adopted session may be new to this account's list
+  } catch (err) {
+    logDebug(`adoptGuestAccount failed: ${err}`, 'error')
+    adoptError.value = "That doesn't look like a private key or personal link — check you copied the whole thing."
+  } finally {
+    adopting.value = false
+  }
+}
+
+async function respondToInvite(invite: PendingInvite, accept: boolean) {
+  if (!currentAccount.value) return
+  respondingId.value = invite.id
+  try {
+    if (accept) {
+      const started = await acceptInvite(invite, currentAccount.value)
+      if (!started) return
+      pendingInvites.value = pendingInvites.value.filter((i) => i.id !== invite.id)
+      navigate(mySessionHash(started.sessionId))
+    } else {
+      await rejectInvite(invite.id)
+      pendingInvites.value = pendingInvites.value.filter((i) => i.id !== invite.id)
+    }
+  } finally {
+    respondingId.value = null
+  }
+}
 
 async function startSession() {
   if (!currentAccount.value) return
@@ -71,14 +173,74 @@ function onLogout() {
   logout()
   navigate(homeHash)
 }
+
 </script>
 
 <template>
   <div class="account-home">
     <div class="top-row">
       <p class="whoami">Signed in as <strong>{{ currentAccount?.account.username }}</strong></p>
-      <button class="chip" @click="onLogout">Log out</button>
+      <div class="top-row-actions">
+        <MenuButton label="Account ▾" tone="tone-blue">
+          <template #default="{ select }">
+            <button class="menu-item" @click="select(openMyKeyModal)">My public key</button>
+            <button class="menu-item" @click="select(openAdoptModal)">Adopt guest account</button>
+          </template>
+        </MenuButton>
+        <button class="chip-ghost tone-danger" @click="onLogout">Log out</button>
+      </div>
     </div>
+
+    <Modal :open="showMyKeyModal" title="My public key" @close="showMyKeyModal = false">
+      <p class="hint">
+        Share this with someone (in person, or however you already trust) so they can invite you to
+        a session directly, without a link.
+      </p>
+      <div class="link-row">
+        <input readonly :value="myPublicKeyBlob" @focus="($event.target as HTMLInputElement).select()" />
+        <button @click="copyMyKey">{{ copiedMyKey ? 'Copied ✓' : 'Copy' }}</button>
+      </div>
+    </Modal>
+
+    <Modal :open="showAdoptModal" title="Adopt guest account" @close="showAdoptModal = false">
+      <p class="hint">
+        Paste a guest identity's private key (e.g. from that link's ⚠ Warning button) to recognize
+        it as you — its messages will render as yours wherever it appears, without touching that
+        link or anyone else's view of it. Works for any session it's part of; you don't need to open
+        that session first.
+      </p>
+      <input
+        v-model="adoptInput"
+        placeholder="Paste their private key or personal link"
+        @keydown.enter="adoptGuestAccount"
+      />
+      <button class="primary" :disabled="adopting || !adoptInput.trim()" @click="adoptGuestAccount">
+        {{ adopting ? 'Adopting…' : 'Adopt account' }}
+      </button>
+      <p v-if="adoptError" class="error">{{ adoptError }}</p>
+    </Modal>
+
+    <ul v-if="pendingInvites.length" class="list invites">
+      <li v-for="invite in pendingInvites" :key="invite.id" class="row invite-row">
+        <span class="name">New session invite</span>
+        <div class="invite-actions">
+          <button
+            class="chip"
+            :disabled="respondingId === invite.id"
+            @click="respondToInvite(invite, true)"
+          >
+            Accept
+          </button>
+          <button
+            class="chip warning"
+            :disabled="respondingId === invite.id"
+            @click="respondToInvite(invite, false)"
+          >
+            Reject
+          </button>
+        </div>
+      </li>
+    </ul>
 
     <button class="primary" :disabled="starting" @click="startSession">
       {{ starting ? 'Starting…' : 'Start a session' }}
@@ -128,6 +290,11 @@ function onLogout() {
   color: var(--text-muted);
 }
 
+.top-row-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
 .chip {
   padding: 0.4rem 0.8rem;
   min-height: 44px;
@@ -137,6 +304,65 @@ function onLogout() {
   color: var(--text);
   font-size: 0.85rem;
   font-weight: 600;
+}
+
+.chip.warning {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.chip:disabled {
+  opacity: 0.6;
+}
+
+.chip-ghost {
+  padding: 0.28rem 0.65rem;
+  min-height: 30px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.chip-ghost.tone-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.menu-item {
+  padding: 0.7rem 0.9rem;
+  min-height: 44px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.menu-item:hover {
+  background: var(--bg-elev-2);
+}
+
+.modal-body input,
+.modal-body .link-row input {
+  padding: 0.6rem;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.invite-row {
+  cursor: default;
+}
+
+.invite-actions {
+  display: flex;
+  gap: 0.4rem;
 }
 
 .primary {

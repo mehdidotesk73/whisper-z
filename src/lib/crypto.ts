@@ -11,7 +11,7 @@ const ECDH_PARAMS: EcKeyImportParams | EcKeyGenParams = { name: 'ECDH', namedCur
 const AES_PARAMS = { name: 'AES-GCM', length: 256 }
 
 export async function generateKeyPair(): Promise<CryptoKeyPair> {
-  return crypto.subtle.generateKey(ECDH_PARAMS, true, ['deriveKey']) as Promise<CryptoKeyPair>
+  return crypto.subtle.generateKey(ECDH_PARAMS, true, ['deriveKey', 'deriveBits']) as Promise<CryptoKeyPair>
 }
 
 export async function exportPublicKey(key: CryptoKey): Promise<JsonWebKey> {
@@ -26,8 +26,19 @@ export async function importPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
   return crypto.subtle.importKey('jwk', jwk, ECDH_PARAMS, true, [])
 }
 
+/**
+ * Strips `key_ops` before importing: a JWK exported before `deriveBits` was
+ * added to `generateKeyPair` (every account/guest identity created before
+ * this feature) carries `key_ops: ['deriveKey']` only, and WebCrypto's JWK
+ * import rejects a request for any usage not already listed there —
+ * `key_ops` here is bookkeeping we ourselves attached at export time, not a
+ * real cryptographic restriction (the key material doesn't care), so this
+ * is safe to relax on our own read path. Without this, every identity
+ * created before this branch fails to log back in at all.
+ */
 export async function importPrivateKey(jwk: JsonWebKey): Promise<CryptoKey> {
-  return crypto.subtle.importKey('jwk', jwk, ECDH_PARAMS, true, ['deriveKey'])
+  const { key_ops: _key_ops, ...rest } = jwk
+  return crypto.subtle.importKey('jwk', rest, ECDH_PARAMS, true, ['deriveKey', 'deriveBits'])
 }
 
 /** An EC private key's JWK already contains its public half (x, y) — no separate export needed. */
@@ -47,6 +58,12 @@ export function publicJwkFromPrivateJwk(jwk: JsonWebKey): JsonWebKey {
  */
 export function canonicalPublicKeyId(jwk: JsonWebKey): string {
   return `${jwk.x}.${jwk.y}`
+}
+
+/** Reverses canonicalPublicKeyId — reconstructs an importable public JWK from an accounts.public_key id string. */
+export function publicKeyFromCanonicalId(id: string): JsonWebKey {
+  const [x, y] = id.split('.')
+  return { kty: 'EC', crv: 'P-256', x, y, ext: true, key_ops: [] }
 }
 
 export async function deriveSharedKey(privateKey: CryptoKey, publicKey: CryptoKey): Promise<CryptoKey> {
@@ -155,6 +172,40 @@ export async function deriveLookupTag(privateKey: CryptoKey, purpose: string): P
   input.set(new TextEncoder().encode(purpose), scalar.byteLength)
   const digest = await crypto.subtle.digest('SHA-256', input)
   return bufToBase64(digest)
+}
+
+// --- Pairwise discoverable secrets (session invites) -------------------------
+// ECDH is symmetric: ECDH(A_priv, B_pub) === ECDH(B_priv, A_pub). Both public
+// keys are already published (accounts.public_key), so two accounts can
+// independently derive the identical secret — no ephemeral keypair, no
+// lookup step, no prior exchange beyond however A obtained B's public key
+// (e.g. physically, out of band). Whoever's key is the target of a search
+// (the invitee) tries this against candidate accounts to find a match by an
+// indexed tag comparison, never a full-table decrypt-and-see. See
+// docs/system-design.md §3 for the full session_invites design and why a
+// username-lookup-based version of this was rejected.
+
+export async function derivePairwiseSecret(privateKey: CryptoKey, otherPublicKey: CryptoKey): Promise<ArrayBuffer> {
+  return crypto.subtle.deriveBits({ name: 'ECDH', public: otherPublicKey }, privateKey, 256)
+}
+
+function purposeTaggedInput(secret: ArrayBuffer, purpose: string): Uint8Array {
+  const input = new Uint8Array(secret.byteLength + purpose.length)
+  input.set(new Uint8Array(secret), 0)
+  input.set(new TextEncoder().encode(purpose), secret.byteLength)
+  return input
+}
+
+/** A stable, indexable tag for a pairwise secret — computable by either side, useless to anyone else. */
+export async function derivePairwiseTag(secret: ArrayBuffer, purpose: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', purposeTaggedInput(secret, purpose))
+  return bufToBase64(digest)
+}
+
+/** A symmetric key for encrypting payloads addressed via a pairwise secret — separate purpose string from the tag. */
+export async function derivePairwiseKey(secret: ArrayBuffer, purpose: string): Promise<CryptoKey> {
+  const keyBytes = await crypto.subtle.digest('SHA-256', purposeTaggedInput(secret, purpose))
+  return crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'])
 }
 
 // --- Encoding helpers ---------------------------------------------------------

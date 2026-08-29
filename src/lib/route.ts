@@ -46,6 +46,30 @@ export function extractHash(pasted: string): string {
   return trimmed.startsWith('/') ? `#${trimmed}` : `#/${trimmed}`
 }
 
+/**
+ * Accepts anything someone might paste to log in: a full account link (any
+ * origin — a preview deploy, production, whatever), a bare `#/account/<key>`
+ * fragment, or just the packed key itself with no wrapper at all. Falls back
+ * to treating the whole trimmed input as the key when it doesn't parse as an
+ * `account` route — `loginWithPackedKey` already fails safely on garbage.
+ */
+export function extractAccountKey(pasted: string): string {
+  const parsed = parseHash(extractHash(pasted))
+  return parsed.name === 'account' ? parsed.packedKey : pasted.trim()
+}
+
+/**
+ * Same idea as extractAccountKey, but for pasting *any* packed private
+ * key — a guest's personal link (`#/session/<key>`, e.g. from the Warning
+ * button), an account link, or the bare key itself. Used where the caller
+ * doesn't care which kind of identity it is, only that it's a private key.
+ */
+export function extractPackedKey(pasted: string): string {
+  const parsed = parseHash(extractHash(pasted))
+  if (parsed.name === 'session' || parsed.name === 'account') return parsed.packedKey
+  return pasted.trim()
+}
+
 export const route = ref<Route>(parseHash(window.location.hash))
 
 window.addEventListener('hashchange', () => {

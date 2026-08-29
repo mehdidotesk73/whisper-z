@@ -53,14 +53,50 @@ design described above. See "An account can migrate a guest session it already h
 displayed sender name is resolved live", and "`session_participants` is keyed by plaintext
 `session_id`" in `docs/system-design.md` §3.
 
+**Stage D: multi-participant invites** (v0.7.0) — verified/polished the existing link-based join for
+3+ people (nothing capped participant count to begin with); session list now sorts by latest-message
+time instead of the originally-planned grouped-by-participant view; added `session_invites` — add an
+existing account by a public key exchanged **out of band** (physically), not looked up by username,
+since a server-side lookup would itself be an observable event correlatable to whatever the inviter
+does next. Uses a pairwise ECDH secret (`derivePairwiseSecret`/`derivePairwiseTag`/`derivePairwiseKey`,
+`src/lib/crypto.ts`) so both sides independently derive an identical, indexable tag with no ephemeral
+key and no lookup — a database dump sees only opaque `{tag, ciphertext}` rows. Accepting an invite is
+exactly `joinExistingSession`; rejecting/undoing is a delete, client-checked only (see
+`docs/system-design.md` §3's "Deletion is client-checked only" for why that's an accepted, pre-existing
+gap, not a new one) — an inviter's "Undo" only works while the invite is still in memory from just
+having sent it, not a real cancel, since the row has no owner reference a later visit could
+reconstruct. Also shipped: a "Log in" option on the logged-out home (`extractAccountKey`, accepts a
+full link on any origin or a bare key — fixed a real regression this surfaced, where every key created
+before `deriveBits` was added to `generateKeyPair` failed to import at all); "Adopt guest account"
+(`adoptGuestIdentity`, `src/api/sessionActions.ts`) on `AccountHome.vue`'s **Account** menu —
+account-level, not tied to any open session; a per-session "Logged in as `<username>`" aliases view on
+`SessionView.vue`'s account-backed route, scoped to the currently-open session on purpose (see "Why
+there's no account-wide list of my aliases" in `docs/system-design.md` §3); and a UI pass moving
+Invite/invite-by-key/aliases/my-key/adopt-account into a shared `Modal.vue` overlay, with Invite and
+Account each collapsed into one `MenuButton.vue` menu. `MenuButton.vue` and `useOutsideClick.ts`
+(`src/lib/`) exist because the Account and Invite menus first duplicated open/close/outside-click
+logic separately, and only one copy actually worked reliably; extracting one shared implementation
+also surfaced and fixed a real mobile Safari ghost-click bug (a synthesized trailing `click`, after
+the tapped menu item was removed from the DOM, was being read as "clicked outside" and closing the
+modal the same tap had just opened) — see `docs/experience.md`'s v0.7.0 entry for the full
+root-cause writeup.
+
 ## Next (Current Sprint)
 
 Continuing the session-model rebuild, in order:
 
-- [ ] **Stage D** — real multi-participant support: invite by public key into an existing session,
-      an `accepted` flag with view-only enforcement (client-checked, not server-verified), a
-      collapsible session list grouped by other participant
-- [ ] **Stage E** — rename/remove a session from your list
+- [ ] **Stage E** — rename/remove a session from your list, plus pin/favorite a session (deferred
+      here from Stage D's list-sort work: sessions with a pin would sort above latest-activity
+      order, not yet designed). Also carries a proposed auto-naming design (from live testing, after
+      seeing a guest's deterministic name show up in an account's chat list — correct, but a little
+      rough since it's not something anyone chose): a session auto-names itself from its
+      participants' usernames, concatenated, plus an invisible marker recording "this title is still
+      auto-generated." As participants change, an auto-generated title keeps regenerating. The first
+      time anyone renames it (or clears it back to empty, on one design option), the marker goes away
+      and it stops auto-updating — a title only a real edit ever produces again. Needs a concrete
+      design before starting: probably a plain `titleIsAuto: boolean` alongside `title` rather than
+      literally hiding a marker inside the rendered string (fragile — collides with a user's own
+      chosen title that happens to match the auto format, ambiguous on rename-to-empty)
 
 One-time setup — tick these off as they're done:
 
@@ -77,10 +113,38 @@ One-time setup — tick these off as they're done:
   detectable. Documented honestly in `docs/concepts/overview.md`, not silently assumed safe
 - No forward secrecy — keys are static per session, so one compromised private key decrypts the
   whole history. A Double Ratchet–style rotation would be a much bigger build
-- **Future feature, deliberately deferred:** a Supabase Edge Function as the sole server-side
-  capability verifier, plus the fine-grained `K_INVITE_MEMBER`/`K_GRANT_ADMIN`-style permission
-  system it would actually enforce. Without the verifier, permissions beyond owner/member are UI
-  suggestions, not real boundaries — see `docs/experience.md` for the full reasoning
+- No protection against network/IP-level traffic correlation — the schema hides the membership
+  graph from database *content*, but not from anyone who can see requests reaching the server (the
+  operator, or a network observer): a stable tag repeatedly fetched from the same IP is a real
+  pattern, and one moment of IP-to-identity linkage (a signup, an ISP log) connects backwards to
+  everything that IP/tag ever touched. Out of scope to fix here — VPN/Tor is the user's own
+  mitigation, not something the app provides. Documented honestly in `docs/concepts/overview.md`
+  and `docs/system-design.md` §3, not silently assumed safe
+- **Future phase, deliberately deferred — admin/capability model (design worked out, not built):**
+  each session gets a second, asymmetric keypair (distinct from the existing symmetric content key)
+  at creation — the admin *public* key rides along in `SessionAccessPayload` (everyone gets it, for
+  free, no new leak); the admin *private* key is the capability itself, delivered to whoever holds
+  admin rights by updating their `session_access` row (same `updateSessionAccess` mechanism Stage C's
+  migration merge uses). No RLS lock-down or Edge Function needed for this specifically: a forged
+  "grant admin" claim can't actually hand anyone a working private key, so it's inert — capability
+  security instead of server-checked security. What this does *not* give you: revocation (once
+  someone has held the key, they keep the ability forever; removing it means rotating to a new
+  keypair and redistributing it) — deliberately punted, admin-forever is fine for now. Actions/log
+  entries would fold into a renamed `messages` → `session_log` table, type-tagged only inside the
+  ciphertext (no plaintext `kind` column needed, since nothing needs pre-decryption gating once
+  forged actions are already inert)
+- **Even further out, deliberately deferred — tamper-evident history:** periodically hash-chain
+  `session_log` snapshots and have participants cross-check the latest hash with each other
+  (catches a compromised DB operator secretly rewriting or rolling back history — nothing else in
+  this design protects against that). Anchoring the hash on an external blockchain was considered
+  and explicitly rejected as disproportionate for this app's scale (real fees/latency, and it still
+  doesn't solve equivocation — a malicious operator showing different users different histories —
+  without the same participant cross-check anyway, at which point the external chain adds little)
+- A Supabase Edge Function as a general RLS-bypassing gate for security-sensitive mutations was the
+  first idea explored here and is **not** the direction taken — the capability model above needs no
+  such gate for authority; an Edge Function may still matter later for cryptographic operations
+  Postgres itself can't do (e.g. real ECDSA verification), if a use case for that specifically
+  arises
 - Invite links are single-use and expire after 10 minutes now (`claimJoinAccess`,
   `isJoinAccessExpired` in `src/api/sessions.ts`), but any participant — not just the session's
   owner — can currently mint one. Restricting that to the owner needs a `role` check in

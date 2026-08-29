@@ -271,3 +271,30 @@ export function subscribeMessages(sessionId: string, onInsert: (row: MessageRow)
 export function unsubscribe(channel: RealtimeChannel) {
   supabase.removeChannel(channel)
 }
+
+/**
+ * The latest message timestamp per session, for sorting a chat list by
+ * recent activity — `created_at` is plaintext (existence/timing metadata,
+ * same class of leak as everything else that's ever visible), so this
+ * needs no decryption at all. Sessions with no messages yet are simply
+ * absent from the result.
+ */
+export async function fetchLatestMessageTimes(sessionIds: string[]): Promise<Map<string, string>> {
+  if (!sessionIds.length) return new Map()
+  const { data, error } = await supabase
+    .from('messages')
+    .select('session_id, created_at')
+    .in('session_id', sessionIds)
+    .order('created_at', { ascending: false })
+
+  if (error) {
+    logDebug(`fetchLatestMessageTimes failed: ${error.message}`, 'error')
+    return new Map()
+  }
+
+  const latest = new Map<string, string>()
+  for (const row of data as { session_id: string; created_at: string }[]) {
+    if (!latest.has(row.session_id)) latest.set(row.session_id, row.created_at)
+  }
+  return latest
+}

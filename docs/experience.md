@@ -121,6 +121,129 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.7.0 — 2026-08-29 (Stage D: multi-participant invites)
+- **Rejected, before building anything:** an "invite by username" design that resolved a typed
+  username to a public key server-side. Caught in review: the resolution query is itself an
+  observable event, correlatable by timing to whatever the inviter does immediately afterward — a
+  live traffic observer (not even a database dump) could link "X looked up Y" to "X wrote
+  something," no matter how anonymous the row written afterward looks. Every other join path in this
+  app avoids this by construction (a link or private key is a secret both sides already hold, with
+  nothing to resolve); this was the one design that would have introduced a resolve-then-act step
+- **Added:** `session_invites` instead — the inviter already has the invitee's public key, obtained
+  physically/out of band (`AccountHome.vue`'s "My public key" reveals a copyable blob for exactly
+  this). `derivePairwiseSecret`/`derivePairwiseTag`/`derivePairwiseKey` (`src/lib/crypto.ts`) exploit
+  ECDH's symmetry — `ECDH(A_priv, B_pub) === ECDH(B_priv, A_pub)` — so both sides independently
+  derive an identical secret with no ephemeral keypair and no lookup; `checkForInvites`
+  (`src/api/inviteActions.ts`) tries every other account's public key from `accounts` and finds a
+  match with one indexed query, never a full scan. A database dump sees only opaque
+  `{tag, ciphertext}` rows — computing a matching tag needs one of the two private keys.
+  `generateKeyPair`/`importPrivateKey` gained `deriveBits` usage alongside the existing `deriveKey`
+  for this. Verified with a standalone script (8 checks) before wiring in: DH reciprocity, a full
+  round trip, a non-matching third party's candidate check correctly fails, an uninvolved party can't
+  reproduce the tag or decrypt without either private key
+- **Added:** accepting an invite is exactly `joinExistingSession` — an invite only ever needed to
+  deliver a `JoinPayload` privately, so no new join logic exists. Rejecting/canceling is a plain
+  delete, left client-checked (see "Deletion is client-checked only" in `docs/system-design.md` §3
+  for why that's an accepted, pre-existing gap every table already has, not a new one)
+- **Changed:** session list now sorts by latest-message time (`fetchLatestMessageTimes`,
+  `src/api/sessions.ts`, reading plaintext `messages.created_at`) instead of the originally-planned
+  grouped-by-participant view; pin/favorite deferred to Stage E
+- **Dropped:** the originally-planned `accepted` flag / view-only enforcement for a newly-invited
+  participant — it only existed to gate consent for being added without acting, and once invites are
+  never delivered without an explicit accept step, every real join path already requires the
+  affirmative action that consent needs
+- **Designed but explicitly not built this phase** (see `docs/TODO.md`'s "Code" section for the full
+  writeup): an admin/capability model where a session's admin rights are a second, distinct private
+  key rather than a server-checked flag — forged claims are simply inert, since they can't hand
+  anyone a real key, which eliminates the need for an RLS lock-down or Edge Function specifically for
+  capability verification. Revocation isn't solved by this (admin-forever, deliberately, for now).
+  Also considered and rejected as disproportionate for this app's scale: anchoring a hash-chained
+  history on an external blockchain for tamper evidence — the cheaper, sufficient version is
+  participants cross-checking a hash with each other directly, no external chain needed
+- **Added:** a "Log in" option on the logged-out home (`SessionHome.vue`) — there was previously no
+  direct way to sign back into an account without routing through an unrelated flow (joining,
+  migrating). `extractAccountKey` (`src/lib/route.ts`) accepts a full account link on any origin
+  (a preview deploy or production) or just the bare packed key, falling back to treating the whole
+  trimmed input as the key when it doesn't parse as a route
+- **Fixed a real regression, found through live device testing of the above:** pasting a real
+  account link failed with `DataError: Data provided to an operation does not meet requirements`.
+  Root cause: adding `deriveBits` usage to `generateKeyPair` for the invite mechanism meant
+  `importPrivateKey` started requesting `['deriveKey', 'deriveBits']` on every import, but WebCrypto's
+  JWK import rejects a request for any usage not already listed in the JWK's own `key_ops` — and
+  every key exported before this branch has `key_ops: ['deriveKey']` only. This broke *every*
+  pre-existing identity, not just accounts: guest personal links and the "log in and migrate/join"
+  flows all import through the same function. Fixed by stripping `key_ops` before importing — it's
+  bookkeeping this app itself attached at export time, not a real cryptographic restriction, so it's
+  safe to drop and let the current usage list apply regardless of when the key was created. Verified
+  with a standalone script reproducing the exact failure against an old-style JWK, confirming the
+  fix succeeds where the pre-fix import throws the identical error
+- **Added, after live testing surfaced the gap:** the invite-sent confirmation now names the
+  recipient ("Invite sent to ava," resolved from the exact key just pasted — no new leak, since the
+  inviter already holds it) and "Cancel it" was renamed "Undo," since that's what it actually is: it
+  only works while the invite is still held in the inviter's own memory from just having sent it, not
+  a real, always-available cancel (the row has no owner reference for a later visit to reconstruct).
+  A persistent local list of sent invites was considered and explicitly rejected — undo-in-memory is
+  the honest scope, matching what the design can actually support
+- **Added:** "Adopt guest account" (`adoptGuestIdentity`, `src/api/sessionActions.ts`) — the mirror
+  of "+ Add to account" from the other side: paste a guest identity's private key to recognize it as
+  you, wherever it appears. First built as a `SessionView.vue` per-session control, then generalized
+  to a fully account-level action on `AccountHome.vue`'s **Account** menu once it became clear it
+  didn't need to be session-scoped at all — a guest identity holds exactly one `session_access` row
+  by construction, so `adoptGuestIdentity` derives its lookup tag and opens that one row itself to
+  learn which session and key to merge, rather than requiring the caller to already be viewing it.
+  Same `migrateGuestSessionToAccount` call underneath either way. Paired with a per-session "Logged
+  in as `<username>`" control on `SessionView.vue` showing which senders in *that* session are
+  adopted aliases — deliberately scoped to the currently-open session rather than a global,
+  cross-session list, after working through why a global version would need its own new,
+  distinguishable fetch (see `docs/system-design.md` §3's "Why there's no account-wide list of my
+  aliases")
+- **UI pass, after live testing:** every panel that used to expand inline (Invite, invite-by-key,
+  session aliases, my public key, adopt guest account) now opens in `Modal.vue`, a small reusable
+  bottom-sheet/centered overlay. "Invite" collapsed from two separate top-bar buttons into one
+  "Invite ▾" menu offering "By join link"/"By public key". Top-bar buttons that aren't the main
+  action on a screen (Home, Log out, Account, Invite) got a ghost (outline, no fill) style instead of
+  the solid `.chip` used everywhere else, to visually de-emphasize navigation/menu triggers relative
+  to the actual content
+- **Documented, not fixed — a real, distinct gap surfaced through review:** this schema hides the
+  membership graph from anyone with only database *content* access, but does nothing about
+  network/IP-level traffic correlation — an operator or network observer can still see "this IP
+  repeatedly touches this stable tag," and one moment of IP-to-identity linkage (a signup, an ISP
+  log) connects backwards to everything that IP/tag ever touched. VPN/Tor is the real mitigation,
+  and it's the user's choice to make, not something this app provides
+- **Fixed a real bug, found through live device testing of the menu UI pass above:** SessionView's
+  Invite ▾ menu opened and showed both options, but tapping either one did nothing — no modal
+  appeared. AccountHome's near-identical Account ▾ menu worked. The two had each hand-rolled their
+  own open/close state and their own document-level outside-click listener scoped to a large shared
+  wrapper (`panelArea`/`accountMenuArea` — the same wrapper other, unrelated panels used for their
+  own outside-click handling), so the two menus weren't actually running the same code, just
+  similar-looking code, and only one of the two copies happened to work reliably. Root-caused to
+  exactly that duplication rather than to any specific mobile Safari quirk. Fixed by extracting
+  `MenuButton.vue` — a single component that owns its own open state, does outside-click detection
+  against its own root element only (never a page-wide wrapper), and exposes each option a
+  `select(action)` via scoped slot that closes the popover and runs the action together, always in
+  that order. Both menus now use it; there's exactly one implementation of "menu button" behavior to
+  get right instead of two
+- **Root-caused the Invite ▾ menu bug via on-device logs, after static reasoning didn't find it:**
+  tapping a menu option opened its modal correctly, then a *second*, separate click event fired a
+  moment later, was seen by `SessionView`'s outside-click handler as landing outside `panelArea`, and
+  closed everything the first click had just opened — all fast enough to look like tapping did
+  nothing. This is a known mobile Safari behavior: when the tapped element is removed from the DOM as
+  part of handling its own click (here, the menu item disappearing as `MenuButton` closes its
+  popover), the browser can synthesize a trailing `click` afterward, retargeted to whatever's now
+  under that point — in this case, off `panelArea` entirely. Fixed with `useOutsideClick`
+  (`src/lib/useOutsideClick.ts`): an outside click only counts if its `mousedown` *also* started
+  outside, since a ghost click has no mousedown of its own — the real one already fired against the
+  original element before anything was removed. `MenuButton` and `SessionView`'s panel-closing both
+  use it now instead of a bare `document` `click` listener
+- **Restyled:** the ghost tag buttons (Home, Log out, Account ▾, Invite ▾) were rendering with much
+  more padding/height than their small font size implied — closer to the solid `.chip` buttons'
+  footprint than a genuinely small tag/pill. Shrunk padding and min-height and switched to a fully
+  rounded pill shape, matching the tight, thin-border, small-text style of a reference app's tab/toggle
+  pills the user pointed to
+- See "Session list sorted by latest activity," "Adding an existing account to a session by
+  public key," and "'Adopt guest account' is the mirror of '+ Add to account'" in
+  `docs/system-design.md` §3 for the full design
+
 ### v0.6.0 — 2026-08-28 (Stage C: guest → account migration)
 - **Added:** `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) — adds an account's own
   `session_access` row to a session it currently only holds as a guest, plus a new

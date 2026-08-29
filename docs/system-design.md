@@ -129,7 +129,11 @@ accounts (                                                    -- a stable, inten
   id uuid pk, username text unique, public_key text unique, created_at
 )
 
-private_account_state (                                       -- reserved for Stage C (guest→account migration)
+session_invites (                        -- Stage D: add an account by a public key exchanged out of band
+  id uuid pk, tag text, ciphertext text, iv text, created_at
+)
+
+private_account_state (                                       -- reserved, not yet used by any shipped feature
   id uuid pk, owner_pub text, ciphertext text, iv text,
   ephemeral_public_key text, created_at
 )
@@ -338,11 +342,107 @@ reveals a join link on demand and a **Warning** control (shown whenever the curr
 account to fall back on) explaining that closing the tab without saving the personal link means
 permanent loss of access.
 
+**Session list sorted by latest activity, not grouped by participant.** `fetchLatestMessageTimes`
+(`src/api/sessions.ts`) reads `messages.created_at` — already plaintext, the same existence/timing
+metadata the schema has always exposed — for every session in an account's list, and
+`fetchSessionList` sorts descending by that. A session with no messages yet sinks to the bottom.
+Superseded an earlier plan to group the list by other participant, in favor of something closer to
+how every real chat app behaves; pin/favorite is deferred to a later UX-polish phase.
+
+**Adding an existing account to a session by public key — Stage D's `session_invites`, and why it
+isn't a username lookup.** An early design let an inviter type someone's username and resolve it to
+a public key server-side. That was rejected: resolving an identifier to a key is an *observable
+event*, and it's tied by timing to whatever the inviter does immediately after — a live traffic
+observer (not even a database dump) could correlate "X looked up Y" with "X wrote something," no
+matter how anonymous the row that gets written looks. Every other join path in this app avoids this
+entirely by construction (a link or a private key is a secret both sides already hold, with nothing
+to resolve) — a lookup-based invite is the one thing that would have introduced a resolve-then-act
+step, so it was dropped rather than patched.
+
+The shipped design instead assumes the inviter already has the invitee's public key, obtained
+**out of band** — physically, or however the two people already trust each other (`AccountHome.vue`'s
+"My public key" reveals a copyable blob for exactly this). From there:
+
+- ECDH is symmetric: `ECDH(inviter_priv, invitee_pub) === ECDH(invitee_priv, inviter_pub)` (this is
+  the definition of Diffie-Hellman, not a new primitive) — `derivePairwiseSecret`
+  (`src/lib/crypto.ts`) computes it via `deriveBits`, since (unlike every other use of ECDH in this
+  app) two *different* purposes need to be derived from the same raw secret: a discoverable `tag`
+  and a symmetric `key` (`derivePairwiseTag`/`derivePairwiseKey`, each hashing the secret with a
+  distinct purpose string, the same namespacing idea as `deriveLookupTag`).
+- The inviter seals a `JoinPayload` (`{sessionId, sessionKey}` — exactly what a link-based invite
+  already carries) with the pairwise key, and writes `{tag, ciphertext, iv}` to `session_invites`
+  (`createSessionInvite`, `src/api/inviteActions.ts`). No ephemeral keypair, unlike `session_access`
+  — the secret is a stable pairwise value, so there's nothing to generate per invite.
+- The invitee derives the identical tag from *their* side, tried against every other account in
+  `accounts` (`checkForInvites`) — the one already-public directory in this schema — and finds a
+  match with one indexed `where tag in (...)` query, never a table scan. A database dump sees only
+  opaque `{tag, ciphertext}` rows: computing a matching tag requires one of the two private keys, so
+  nothing is attributable to either party without one. Accepted residual leak: two invites between
+  the same pair share an identical tag, since the secret is fixed per pair — reveals "these two rows
+  are linked," never to whom, the same class of leak as everything else in this schema.
+- Accepting an invite is exactly `joinExistingSession` — the invite only ever needed to deliver a
+  `JoinPayload` privately; nothing about joining itself is new. Rejecting (invitee) or **undoing**
+  (inviter — not "canceling": it only works while they still hold the row id in memory from just
+  having sent it, gone on refresh, since the row has no owner reference for a later visit to
+  reconstruct) is a delete, gated only by whichever side can derive the tag to begin with — see the
+  note below on why that's not enforced any harder than that. The inviter's own client resolves and
+  shows the recipient's username right after sending ("Invite sent to ava") by looking up the exact
+  public key it just pasted — no new leak, since the inviter already holds that key itself.
+
+**Deletion is client-checked only, same as every other write in this schema.** RLS can check row
+contents and connection metadata, not a cryptographic proof — Postgres has no built-in way to verify
+"does the caller hold the private key matching this row" the way `crypto.subtle.verify` could, so
+`using (true)` (which every table already has, for every operation, not just this one) can't stop a
+malicious client from deleting *any* row in *any* table today. This isn't a new gap `session_invites`
+introduces; it's the same one every table has always had. Deleting a `session_invites` row can't
+forge or read anything either way — worst case is losing an invite before it's seen, which can just
+be re-sent — so it's an acceptable place to leave client-checked, consistent with the already-
+documented "restricting invite-link minting to the owner" gap.
+
+**"Adopt guest account" is the mirror of "+ Add to account," from the other side — and it's fully
+account-level, not tied to any open session.** The original migration flow requires opening the
+*guest's* personal link and clicking "+ Add to account" from there. `adoptGuestIdentity`
+(`src/api/sessionActions.ts`), reachable from `AccountHome.vue`'s **Account** menu, does the same
+`migrateGuestSessionToAccount` call, just triggered from the account's own home screen instead: paste
+the guest identity's *private* key directly (the same key its Warning button reveals). It doesn't
+need to already be viewing that session — a guest identity holds exactly one `session_access` row by
+construction (a fresh keypair per visit), so `adoptGuestIdentity` derives the guest's own lookup tag,
+opens that one row itself to learn which session and key it's for, and calls
+`migrateGuestSessionToAccount` with those. No new mechanism — same merge, same non-destructive
+semantics, just an entry point that works from anywhere. A separate "Logged in as `<username>`"
+control on `SessionView.vue` (account-backed `sessionId` routes only) shows *that particular
+session's* adopted aliases, resolved via `sessionAliasKeys`/`nameFor` state already loaded to render
+the thread — no new fetch, per the same reasoning that ruled out a global, cross-session aliases view
+(see below). Adopting is account-wide; seeing the effect is still naturally per-session.
+
+**Why there's no account-wide "list of my aliases" page.** A global view would need its own fetch —
+"give me every alias this account has ever adopted, across every session" — and that fetch would
+itself be a new, distinguishable network event, exactly the kind of pattern this schema has
+otherwise avoided (see the username-lookup rejection above). Each session's aliases already ride
+inside that session's own `session_access` payload, which the account was going to decrypt anyway to
+open the session — so surfacing them only *inside* an already-open session costs nothing extra,
+while a cross-session aggregation would cost something new. Scope stays per-session on purpose.
+
+**Honest limitation: this protects database *content*, not network-level traffic patterns.** Nothing
+here stops a party with visibility into requests reaching the server — the hosting operator, or
+anyone watching network traffic to it — from observing "this IP repeatedly fetches rows tagged with
+this `owner_pub`" or "these two IPs both touch this session's rows," independent of anything being
+encrypted. That correlation isn't nothing: `createAccount` sends a plaintext username at account
+creation, and `fetchSessionAccessForOwner` is called with the *same stable* tag every time that
+account checks its chat list — so a single moment where an IP is tied to a username (a signup
+record, an ISP log, a coffee-shop WiFi sheet) can retroactively connect that IP's entire request
+history back to everything its tag ever touched. This is a traffic-analysis problem, not a database
+one, and the schema's design (hidden membership graph, no plaintext identity columns) does nothing to
+address it — the only real mitigation is the user's own choice to connect through a VPN or Tor, which
+changes what IP the server sees in the first place. Incognito/private browsing mode does not help
+here: it only affects local browser storage, not what the server observes over the network.
+
 **What the server can and can't see:** ciphertext is opaque, exactly as before. What's new here is
 that the *membership graph itself* — which sessions a given identity/account touches — is opaque
 too, not just message content. Metadata that remains visible: that a session exists, roughly when
 messages were sent, how many `session_access` rows a given lookup tag has (existence/count, not
-which sessions). There's still no out-of-band key verification and no forward secrecy — same
+which sessions), and now also how many `session_invites` rows exist system-wide (count only, never
+who they're between). There's still no out-of-band key verification and no forward secrecy — same
 honest caveats as before, now joined by "an active database attacker with write access could still
 tamper with a row in ways an honest client would reject, but nothing here stops that at the server;
 see `docs/experience.md` for why that's deliberately out of scope for now."
@@ -383,14 +483,36 @@ Organized by feature. Keep them thin — mostly templating, logic lives in `lib/
 
 ```
 src/components/
+  Modal.vue           generic bottom-sheet/centered overlay (open, title, @close) — every panel that
+                      used to expand inline (Invite, invite-by-key, aliases, my key, adopt account)
+                      now renders inside one of these instead
+  MenuButton.vue      generic ghost-button trigger + options popover (label, tone; scoped-slot gives
+                      each option a `select(action)` that closes the popover and runs the action
+                      together, and outside-click detection is scoped to the component's own root
+                      element) — both AccountHome's Account menu and SessionView's Invite menu use
+                      this instead of separately hand-rolling the same open/close/outside-click logic.
+                      Its outside-click detection, and SessionView's panel-closing, both go through
+                      lib/useOutsideClick.ts — a click alone isn't enough to count as "outside," since
+                      mobile Safari can synthesize a trailing ghost click after the tapped element is
+                      removed from the DOM; requiring the mousedown to also have started outside
+                      filters that out
   HelpModal.vue       renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
-  SessionHome.vue     logged-out home: "Start a session" + paste-a-link box + "Create an account"
-  AccountHome.vue     logged-in home: chat list (src/api/sessionList.ts) + "Start a session"
+  SessionHome.vue     logged-out home: "Start a session", paste-a-link box, "Create an account", and
+                      "Log in" (accepts a full account link, any origin, or just the bare key)
+  AccountHome.vue     logged-in home: "Signed in as <username>" (top left), an **Account** menu
+                      (top right, next to a ghost "Log out") offering "My public key" and "Adopt
+                      guest account" — src/api/sessionActions.ts's adoptGuestIdentity, reachable from
+                      here regardless of which session a pasted guest identity belongs to — plus
+                      chat list sorted by latest activity (src/api/sessionList.ts) and pending
+                      invites, + "Start a session"
   CreateAccount.vue   generate an account keypair + username, reveal its one-time account link
   JoinSession.vue     redeem an invite link as the logged-in account, a guest, or by logging in
                       on the spot (pasting an account link) — all via sessionActions.ts
-  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId,
-                      and a guest route can migrate to an account in place ("+ Add to account")
+  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId. A
+                      guest route can migrate to an account in place ("+ Add to account"); an
+                      account route shows "Signed in as <username>", tap for that session's adopted
+                      aliases. An **Invite** menu offers "By join link" and "By public key"
+                      (src/api/inviteActions.ts), each opening its panel in a modal
 ```
 
 ## §7 — Build, Deploy & Conventions

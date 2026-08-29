@@ -29,8 +29,12 @@ import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } f
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
 import { isIdentityMerged, migrateGuestSessionToAccount } from '../api/sessionActions'
+import { createSessionInvite, rejectInvite } from '../api/inviteActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
+import { useOutsideClick } from '../lib/useOutsideClick'
+import Modal from './Modal.vue'
+import MenuButton from './MenuButton.vue'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
 // Either a guest personal-link key, or an account's session id (looked up
@@ -57,6 +61,9 @@ const composerTextarea = ref<HTMLTextAreaElement>()
 let activeSessionId = ''
 let sessionKey: CryptoKey | null = null
 let sessionKeyJwk: JsonWebKey | null = null
+// The identity used to SEND an invite from this session — same private key
+// as everything else in onMounted, just held onto for inviteByKey().
+let ownPrivateKey: CryptoKey | null = null
 // The identity used to SEND: a guest's one-off key, or an account's real
 // key (always — even for a migrated session, see onMounted below).
 let ownPublicKeyId = ''
@@ -66,6 +73,11 @@ let ownRole: 'owner' | 'member' = 'member'
 // recognizes its old, pinned guest key as its own (see identityPublicKeyId
 // in lib/sessionTypes.ts).
 let myKeys = new Set<string>()
+// Reactive mirror of the guest keys folded into myKeys (never includes
+// ownPublicKeyId itself) — kept separate from the plain Set above so the
+// hot per-message `.has()` check in decodeAndAppend stays cheap, while this
+// still drives the "logged in as" aliases panel reactively.
+const sessionAliasKeys = ref<string[]>([])
 
 // Sender display names are resolved per-message from `sender` alone, live
 // against `accounts`, with a deterministic (no-lookup) fallback for a key
@@ -134,6 +146,7 @@ onMounted(async () => {
       status.value = 'not-found'
       return
     }
+    ownPrivateKey = privateKey
 
     const ownerPub = await deriveLookupTag(privateKey, 'session-access')
     const rows = await fetchSessionAccessForOwner(ownerPub)
@@ -170,6 +183,7 @@ onMounted(async () => {
       // extends "mine" to also cover messages sent before migration.
       ownPublicKeyId = currentAccount.value!.publicKeyId
       myKeys = new Set([ownPublicKeyId, ...(access.identityPublicKeyIds ?? [])])
+      sessionAliasKeys.value = access.identityPublicKeyIds ?? []
     } else if (currentAccount.value) {
       // Viewing a guest link while already logged in — check whether *this*
       // guest identity specifically has already been merged in, so "Add to
@@ -239,26 +253,82 @@ async function generateInvite() {
   if (!sessionKeyJwk) return
   copiedInvite.value = false
   inviteLink.value = ''
-  const secretBytes = generateJoinSecret()
-  const joinKey = await importJoinKey(secretBytes)
-  const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
-  const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
-  const joinId = await createJoinAccess({ ciphertext, iv })
-  if (!joinId) return
-  inviteLink.value = `${location.origin}${location.pathname}${joinHash(joinId, bytesToUrlSafe(secretBytes))}`
-}
-
-async function toggleInvite() {
-  showWarning.value = false
-  showMigrate.value = false
-  showInvite.value = !showInvite.value
-  if (showInvite.value && !inviteLink.value) await generateInvite()
+  try {
+    const secretBytes = generateJoinSecret()
+    const joinKey = await importJoinKey(secretBytes)
+    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+    const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
+    const joinId = await createJoinAccess({ ciphertext, iv })
+    if (!joinId) return
+    inviteLink.value = `${location.origin}${location.pathname}${joinHash(joinId, bytesToUrlSafe(secretBytes))}`
+  } catch (err) {
+    logDebug(`generateInvite failed: ${err}`, 'error')
+  }
 }
 
 async function copyInvite() {
   if (await copyToClipboard(inviteLink.value)) {
     copiedInvite.value = true
     setTimeout(() => (copiedInvite.value = false), 1500)
+  }
+}
+
+// Invite by key: add an existing account directly, using a public key
+// exchanged out of band (physically) rather than a shareable link — see
+// api/inviteActions.ts and lib/crypto.ts's "Pairwise discoverable secrets"
+// section for why this never involves a server-side lookup of any kind.
+const showInviteByKey = ref(false)
+const inviteByKeyInput = ref('')
+const invitingByKey = ref(false)
+const inviteByKeyError = ref('')
+const lastInviteId = ref<string | null>(null)
+const lastInviteRecipient = ref('')
+const undoingInvite = ref(false)
+
+async function sendInviteByKey() {
+  if (!ownPrivateKey || !sessionKeyJwk) return
+  const pasted = inviteByKeyInput.value.trim()
+  if (!pasted) return
+
+  invitingByKey.value = true
+  inviteByKeyError.value = ''
+  try {
+    const targetPublicKeyJwk = unpackJwk(pasted)
+    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+    const created = await createSessionInvite(payload, ownPrivateKey, targetPublicKeyJwk)
+    if (!created) {
+      inviteByKeyError.value = 'Could not send the invite — try again.'
+      return
+    }
+    lastInviteId.value = created.id
+    // The inviter already holds this exact key (they just pasted it), so
+    // naming who it belongs to here reveals nothing new to anyone else.
+    const targetAccount = await fetchAccountByPublicKey(canonicalPublicKeyId(targetPublicKeyJwk))
+    lastInviteRecipient.value = targetAccount?.username ?? 'that key'
+    inviteByKeyInput.value = ''
+  } catch (err) {
+    logDebug(`sendInviteByKey failed: ${err}`, 'error')
+    inviteByKeyError.value = "That doesn't look like a public key — check you copied the whole thing."
+  } finally {
+    invitingByKey.value = false
+  }
+}
+
+/**
+ * Not a real cancel — an undo. It only works while this exact invite is
+ * still in memory, right here, right after sending; refresh the page and
+ * there's nothing left to undo (see rejectInvite's doc comment — the row
+ * itself has no owner reference for a later session to reconstruct).
+ */
+async function undoLastInvite() {
+  if (!lastInviteId.value) return
+  undoingInvite.value = true
+  try {
+    await rejectInvite(lastInviteId.value)
+    lastInviteId.value = null
+    lastInviteRecipient.value = ''
+  } finally {
+    undoingInvite.value = false
   }
 }
 
@@ -270,9 +340,9 @@ const personalLink = props.packedKey ? `${location.origin}${location.pathname}#/
 const copiedPersonal = ref(false)
 
 function toggleWarning() {
-  showInvite.value = false
-  showMigrate.value = false
-  showWarning.value = !showWarning.value
+  const opening = !showWarning.value
+  closeAllPanels()
+  showWarning.value = opening
 }
 
 async function copyPersonal() {
@@ -291,9 +361,9 @@ const migrateError = ref('')
 const migrateAccountLinkInput = ref('')
 
 function toggleMigrate() {
-  showInvite.value = false
-  showWarning.value = false
-  showMigrate.value = !showMigrate.value
+  const opening = !showMigrate.value
+  closeAllPanels()
+  showMigrate.value = opening
   migrateError.value = ''
 }
 
@@ -346,15 +416,48 @@ async function loginThenMigrate() {
   await migrateToAccount()
 }
 
-function onDocClick(e: MouseEvent) {
-  if (panelArea.value && !panelArea.value.contains(e.target as Node)) {
-    showInvite.value = false
-    showWarning.value = false
-    showMigrate.value = false
-  }
+// "Logged in as" + this session's aliases — only meaningful on an
+// account-backed (sessionId) route; a guest route's identity has no
+// separate "logged in as" concept. Reuses sessionAliasKeys/nameFor, both
+// already populated to render the thread — no new fetch. Adopting an alias
+// itself now lives on AccountHome's "Account" menu (see
+// api/sessionActions.ts's adoptGuestIdentity) — it works from anywhere, not
+// just from inside the session it belongs to, so it no longer needs a
+// button here at all.
+const showAliases = ref(false)
+
+function toggleAliases() {
+  const opening = !showAliases.value
+  closeAllPanels()
+  showAliases.value = opening
 }
-onMounted(() => document.addEventListener('click', onDocClick))
-onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
+
+// Invite menu: a small popover offering the two ways to invite, each
+// opening its panel in a modal rather than inline. The popover itself is
+// MenuButton (see components/MenuButton.vue) — it owns closing itself and
+// running the selected option's action together, so there's nothing here to
+// get out of sync.
+async function openInviteModal() {
+  closeAllPanels()
+  showInvite.value = true
+  if (!inviteLink.value) await generateInvite()
+}
+
+function openInviteByKeyModal() {
+  closeAllPanels()
+  showInviteByKey.value = true
+  inviteByKeyError.value = ''
+}
+
+function closeAllPanels() {
+  showInvite.value = false
+  showInviteByKey.value = false
+  showWarning.value = false
+  showMigrate.value = false
+  showAliases.value = false
+}
+
+useOutsideClick(panelArea, closeAllPanels)
 
 function goHome() {
   navigate(homeHash)
@@ -363,31 +466,32 @@ function goHome() {
 
 <template>
   <div class="session">
-    <div class="top-bar">
-      <button class="chip" @click="goHome">← Home</button>
-      <button v-if="status === 'ready'" class="chip" @click.stop="toggleInvite">Invite</button>
-      <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip" @click.stop="toggleMigrate">
-        + Add to account
-      </button>
-      <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
-    </div>
-
     <div ref="panelArea">
-      <div v-if="showInvite" class="link-block">
-        <label>Invite link</label>
-        <p class="hint">
-          Send this to someone so they can join. It works once and expires in 10 minutes — generate
-          a new one for the next person.
-        </p>
-        <div class="link-row">
-          <input
-            readonly
-            :value="inviteLink || 'Generating…'"
-            @focus="($event.target as HTMLInputElement).select()"
-          />
-          <button :disabled="!inviteLink" @click="copyInvite">{{ copiedInvite ? 'Copied ✓' : 'Copy' }}</button>
-        </div>
-        <button class="new-link" :disabled="!inviteLink" @click="generateInvite">New link, for another person</button>
+      <div class="top-bar-row">
+        <button class="chip-ghost tone-neutral" @click="goHome">← Home</button>
+      </div>
+
+      <div class="top-bar-row identity-row">
+        <span
+          v-if="status === 'ready' && props.sessionId && currentAccount"
+          class="whoami-text"
+          @click.stop="toggleAliases"
+        >
+          Signed in as <strong>{{ currentAccount.account.username }}</strong>
+        </span>
+        <MenuButton v-if="status === 'ready'" label="Invite ▾" tone="tone-blue" class="invite-menu-wrap">
+          <template #default="{ select }">
+            <button class="menu-item" @click="select(openInviteModal)">By join link</button>
+            <button class="menu-item" @click="select(openInviteByKeyModal)">By public key</button>
+          </template>
+        </MenuButton>
+      </div>
+
+      <div class="top-bar">
+        <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip" @click.stop="toggleMigrate">
+          + Add to account
+        </button>
+        <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
       </div>
 
       <div v-if="showWarning" class="link-block warning-block">
@@ -427,6 +531,46 @@ function goHome() {
         <p v-if="migrateError" class="error">{{ migrateError }}</p>
       </div>
     </div>
+
+    <Modal :open="showInvite" title="Invite link" @close="showInvite = false">
+      <p class="hint">
+        Send this to someone so they can join. It works once and expires in 10 minutes — generate a
+        new one for the next person.
+      </p>
+      <div class="link-row">
+        <input readonly :value="inviteLink || 'Generating…'" @focus="($event.target as HTMLInputElement).select()" />
+        <button :disabled="!inviteLink" @click="copyInvite">{{ copiedInvite ? 'Copied ✓' : 'Copy' }}</button>
+      </div>
+      <button class="new-link" :disabled="!inviteLink" @click="generateInvite">New link, for another person</button>
+    </Modal>
+
+    <Modal :open="showInviteByKey" title="Invite by key" @close="showInviteByKey = false">
+      <p class="hint">
+        Paste a public key someone shared with you directly (in person, or however you already
+        trust) to add them to this session — no link needed.
+      </p>
+      <input v-model="inviteByKeyInput" placeholder="Paste their public key" @keydown.enter="sendInviteByKey" />
+      <button class="primary" :disabled="invitingByKey || !inviteByKeyInput.trim()" @click="sendInviteByKey">
+        {{ invitingByKey ? 'Sending…' : 'Send invite' }}
+      </button>
+      <p v-if="inviteByKeyError" class="error">{{ inviteByKeyError }}</p>
+      <div v-if="lastInviteId" class="hint">
+        Invite sent to {{ lastInviteRecipient }}.
+        <button class="new-link" :disabled="undoingInvite" @click="undoLastInvite">
+          {{ undoingInvite ? 'Undoing…' : 'Undo' }}
+        </button>
+      </div>
+    </Modal>
+
+    <Modal :open="showAliases" title="Your aliases in this session" @close="showAliases = false">
+      <p v-if="sessionAliasKeys.length" class="hint">Messages from these senders in this thread are also you:</p>
+      <ul v-if="sessionAliasKeys.length" class="alias-list">
+        <li v-for="key in sessionAliasKeys" :key="key">{{ nameFor(key) }}</li>
+      </ul>
+      <p v-else class="hint">
+        No other aliases adopted into this session yet — adopt one from your account's "Account" menu.
+      </p>
+    </Modal>
 
     <p v-if="status === 'loading'" class="status">Loading…</p>
     <p v-else-if="status === 'not-found'" class="status error">
@@ -473,6 +617,26 @@ function goHome() {
   flex-wrap: wrap;
 }
 
+.top-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.identity-row {
+  justify-content: space-between;
+}
+
+.whoami-text {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.whoami-text:hover {
+  color: var(--text);
+}
+
 .chip {
   padding: 0.4rem 0.8rem;
   min-height: 44px;
@@ -491,6 +655,39 @@ function goHome() {
 .chip.warning {
   border-color: var(--danger);
   color: var(--danger);
+}
+
+.chip-ghost {
+  padding: 0.28rem 0.65rem;
+  min-height: 30px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.chip-ghost.tone-neutral {
+  color: var(--text-muted);
+}
+
+.invite-menu-wrap {
+  margin-left: auto;
+}
+
+.menu-item {
+  padding: 0.7rem 0.9rem;
+  min-height: 44px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.menu-item:hover {
+  background: var(--bg-elev-2);
 }
 
 .status {
@@ -516,7 +713,8 @@ function goHome() {
   border-color: var(--danger);
 }
 
-.link-block label {
+.link-block label,
+.modal-body label {
   font-weight: 600;
   font-size: 0.9rem;
 }
@@ -525,6 +723,12 @@ function goHome() {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.8rem;
+}
+
+.alias-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.85rem;
 }
 
 .link-row {
@@ -569,7 +773,8 @@ function goHome() {
   text-decoration: none;
 }
 
-.link-block input {
+.link-block input,
+.modal-body input {
   padding: 0.6rem;
   min-height: 44px;
   border: 1px solid var(--border);
@@ -579,7 +784,8 @@ function goHome() {
   font-size: 0.9rem;
 }
 
-.link-block .primary {
+.link-block .primary,
+.modal-body .primary {
   align-self: flex-start;
   padding: 0.6rem 1rem;
   min-height: 44px;
@@ -591,11 +797,13 @@ function goHome() {
   font-size: 0.9rem;
 }
 
-.link-block .primary:disabled {
+.link-block .primary:disabled,
+.modal-body .primary:disabled {
   opacity: 0.6;
 }
 
-.link-block .error {
+.link-block .error,
+.modal-body .error {
   color: var(--danger);
   margin: 0;
   font-size: 0.85rem;

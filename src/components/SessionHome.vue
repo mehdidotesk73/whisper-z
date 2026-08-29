@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { startNewSession } from '../api/sessionActions'
-import { sessionHash, navigate, parseHash, extractHash } from '../lib/route'
+import { sessionHash, navigate, parseHash, extractHash, extractAccountKey } from '../lib/route'
+import { loginWithPackedKey } from '../lib/auth'
 import { logDebug } from '../debug'
 import CreateAccount from './CreateAccount.vue'
 
@@ -10,6 +11,33 @@ const failed = ref(false)
 const pastedLink = ref('')
 const pasteError = ref('')
 const showCreateAccount = ref(false)
+const showLogin = ref(false)
+const loginInput = ref('')
+const loginError = ref('')
+const loggingIn = ref(false)
+
+async function login() {
+  loginError.value = ''
+  const pasted = loginInput.value.trim()
+  if (!pasted) return
+
+  loggingIn.value = true
+  try {
+    const key = extractAccountKey(pasted)
+    const ok = await loginWithPackedKey(key)
+    if (!ok) {
+      loginError.value = "That didn't work — check you pasted the whole link or key."
+      return
+    }
+    // currentAccount is reactive, so App.vue swaps straight to AccountHome —
+    // nothing else to do here.
+  } catch (err) {
+    logDebug(`login failed: ${err}`, 'error')
+    loginError.value = "That didn't work — check you pasted the whole link or key."
+  } finally {
+    loggingIn.value = false
+  }
+}
 
 async function startSession() {
   starting.value = true
@@ -48,12 +76,25 @@ function goToPastedLink() {
       Start an end-to-end encrypted session. Your keys are generated in this browser and never sent
       anywhere — only you (and whoever you invite) can read the messages.
     </p>
-    <button v-if="!showCreateAccount" class="secondary" @click="showCreateAccount = true">
-      Create an account
-    </button>
-    <CreateAccount v-else @cancel="showCreateAccount = false" />
+    <div v-if="!showCreateAccount && !showLogin" class="account-actions">
+      <button class="secondary" @click="showCreateAccount = true">Create an account</button>
+      <button class="secondary" @click="showLogin = true">Log in</button>
+    </div>
+    <CreateAccount v-else-if="showCreateAccount" @cancel="showCreateAccount = false" />
+    <div v-else class="link-block">
+      <label>Log in with your account</label>
+      <p class="hint">Paste your account link (preview or production) or just the key itself.</p>
+      <div class="link-row">
+        <input v-model="loginInput" placeholder="Paste your account link or key" @keydown.enter="login" />
+        <button :disabled="loggingIn || !loginInput.trim()" @click="login">
+          {{ loggingIn ? 'Logging in…' : 'Log in' }}
+        </button>
+      </div>
+      <button class="secondary" @click="showLogin = false">Cancel</button>
+      <p v-if="loginError" class="error">{{ loginError }}</p>
+    </div>
 
-    <template v-if="!showCreateAccount">
+    <template v-if="!showCreateAccount && !showLogin">
       <div class="divider"><span>or</span></div>
 
       <button class="primary" :disabled="starting" @click="startSession">
@@ -87,6 +128,15 @@ function goToPastedLink() {
 .intro {
   color: var(--text-muted);
   margin: 0;
+}
+
+.account-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.account-actions .secondary {
+  flex: 1;
 }
 
 .primary {

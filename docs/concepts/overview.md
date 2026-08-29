@@ -72,6 +72,9 @@ given to each participant individually as they join. Every message is encrypted 
 before it's sent, and decrypted locally when it arrives. Anyone without an account shows up under a
 short random name (like "BlueFox") instead of a real identity.
 
+Opening a session loads the last week of messages; **Load more** at the top of the thread reveals
+the previous week, and only appears at all when there's actually earlier history to load.
+
 ## What this protects, and what it doesn't
 
 - **Message content is unreadable to the server and the database** — they only ever see ciphertext.

@@ -81,6 +81,14 @@ the tapped menu item was removed from the DOM, was being read as "clicked outsid
 modal the same tap had just opened) — see `docs/experience.md`'s v0.7.0 entry for the full
 root-cause writeup.
 
+**Message history pagination** (v0.8.0) — `SessionView.vue` used to load a session's entire message
+history on open; now loads a `MESSAGE_PAGE_DAYS`-wide window (7 days) at a time
+(`fetchMessagesInRange`, `src/api/sessions.ts`), with a **Load more** button at the top of the thread
+that shifts the window back another 7 days, prepending older messages and adjusting scroll position
+to match so the view doesn't jump. Whether to show the button is a real existence check
+(`hasMessagesBefore`) run after each load, not assumed — see "Message history loads a window at a
+time" in `docs/system-design.md` §3.
+
 ## Next (Current Sprint)
 
 Continuing the session-model rebuild, in order:

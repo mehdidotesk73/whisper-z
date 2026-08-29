@@ -139,6 +139,22 @@ private_account_state (                                       -- reserved, not y
 )
 ```
 
+**What each `ciphertext` actually decrypts to.** The schema above shows column names, not payload
+shapes — a plaintext column tells you what's *stored*, but every meaningful field in this app lives
+inside a ciphertext blob, and that shape is exactly as much a part of the design as the columns are.
+Every payload type below lives in `src/lib/sessionTypes.ts` unless noted otherwise.
+
+| Table | Looked up by | Encrypted with | Decrypts to | Notes |
+|---|---|---|---|---|
+| `session_access` | `owner_pub` (a derived lookup tag, not a real public key) | ECIES sealed to the row's owner — `sealForRecipient`/`openSealed`, using the row's own `ephemeral_public_key` | `SessionAccessPayload { sessionId, sessionKey, role: 'owner' \| 'member', title?, identityPublicKeyIds? }` | `sessionKey` (a JWK) is the actual credential this row exists to deliver — everything else is metadata about it. `title` is declared but nothing writes it yet (see below). `identityPublicKeyIds` is a private hint only the account itself can read — see "An account can migrate a guest session it already holds" |
+| `join_access` | `id` (the row's own uuid, carried directly in the join link) | A raw AES-256 key carried in the link's URL fragment (`generateJoinSecret`/`importJoinKey`) — no key agreement, no persistent identity on either end | `JoinPayload { sessionId, sessionKey }` | Same payload shape as `session_invites` below; the two differ only in *how the reader gets the key*, not in what the key unlocks |
+| `session_invites` | `tag` (a pairwise-derived value, independently computable by inviter and invitee only) | Pairwise ECDH secret between the inviter's and invitee's real keypairs (`derivePairwiseKey`) | `JoinPayload { sessionId, sessionKey }` | `tag` itself is `derivePairwiseTag` of that same shared secret — see "Pairwise discoverable secrets" in `lib/crypto.ts` |
+| `session_participants` | `session_id` (plaintext) | The session's own shared AES-256 key — symmetric, the same key `messages` uses, no key agreement needed since holding the session key already proves membership | a bare string — just the participant's canonical public key id, **not** a JSON object | One row per identity that's ever sent a message under that key. No display name and no role live here; a name is resolved live per-message (see `messages` below), and role lives on each viewer's own `session_access` row instead |
+| `messages` | `session_id` (plaintext) | The session's own shared AES-256 key | `DecodedMessage { sender, text, createdAt }` | `sender` is a public key id — resolved to a display name live at render time (an `accounts` lookup, falling back to a deterministic guest name), never stored as a name anywhere |
+| `private_account_state` | `owner_pub`, same scheme as `session_access` | ECIES sealed, same as `session_access` | *(no payload type exists yet — reserved for a future feature, not written by anything shipped)* | |
+| `accounts` | `username` or `public_key`, both plaintext | Not encrypted at all | n/a | The one table with intentionally plaintext, searchable columns — see "account is just another identity" below |
+| `sessions` | `id` | Not encrypted at all | n/a | Literally just an id and a timestamp — an opaque container row, nothing else in it |
+
 **One shared key per session, not a key per pair.** Whoever starts a session generates a single
 random AES-256 key (`generateSessionKey`) — never derived from anyone's identity keypair. Every
 message in that session is encrypted with it. This is what makes adding participants later (a

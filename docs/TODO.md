@@ -66,12 +66,20 @@ Continuing the session-model rebuild, in order:
       (`derivePairwiseSecret`/`derivePairwiseTag`/`derivePairwiseKey`, `src/lib/crypto.ts`) so both
       sides independently derive an identical, indexable tag with no ephemeral key and no lookup —
       a database dump sees only opaque `{tag, ciphertext}` rows. Accepting an invite is exactly
-      `joinExistingSession`; canceling/rejecting is a delete, client-checked only (see
+      `joinExistingSession`; rejecting/undoing is a delete, client-checked only (see
       `docs/system-design.md` §3's "Deletion is client-checked only" for why that's an accepted,
-      pre-existing gap, not a new one). The originally-planned `accepted`-flag/view-only-enforcement
+      pre-existing gap, not a new one) — an inviter's "Undo" only works while the invite is still
+      in memory from just having sent it, not a real cancel, since the row has no owner reference a
+      later visit could reconstruct. The originally-planned `accepted`-flag/view-only-enforcement
       idea was dropped along with username-based invites — it only existed to gate consent for
       being added without acting, and every real join path already requires an affirmative action
-      (a link click, or accepting an invite) that already is that consent.
+      (a link click, or accepting an invite) that already is that consent. Also added: a "Log in"
+      option on the logged-out home (`extractAccountKey`, accepts a full link on any origin or a
+      bare key — fixed a real regression this surfaced, where every key created before `deriveBits`
+      was added to `generateKeyPair` failed to import at all, see `docs/experience.md`); "Adopt an
+      alias" and a per-session "Logged in as `<username>`" aliases view on `SessionView.vue`'s
+      account-backed route, both scoped to the currently-open session on purpose — see "Why there's
+      no account-wide list of my aliases" in `docs/system-design.md` §3.
 - [ ] **Stage E** — rename/remove a session from your list, plus pin/favorite a session (deferred
       here from Stage D's list-sort work: sessions with a pin would sort above latest-activity
       order, not yet designed). Also carries a proposed auto-naming design (from live testing, after
@@ -100,6 +108,13 @@ One-time setup — tick these off as they're done:
   detectable. Documented honestly in `docs/concepts/overview.md`, not silently assumed safe
 - No forward secrecy — keys are static per session, so one compromised private key decrypts the
   whole history. A Double Ratchet–style rotation would be a much bigger build
+- No protection against network/IP-level traffic correlation — the schema hides the membership
+  graph from database *content*, but not from anyone who can see requests reaching the server (the
+  operator, or a network observer): a stable tag repeatedly fetched from the same IP is a real
+  pattern, and one moment of IP-to-identity linkage (a signup, an ISP log) connects backwards to
+  everything that IP/tag ever touched. Out of scope to fix here — VPN/Tor is the user's own
+  mitigation, not something the app provides. Documented honestly in `docs/concepts/overview.md`
+  and `docs/system-design.md` §3, not silently assumed safe
 - **Future phase, deliberately deferred — admin/capability model (design worked out, not built):**
   each session gets a second, asymmetric keypair (distinct from the existing symmetric content key)
   at creation — the admin *public* key rides along in `SessionAccessPayload` (everyone gets it, for

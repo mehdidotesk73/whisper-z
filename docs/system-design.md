@@ -381,10 +381,13 @@ The shipped design instead assumes the inviter already has the invitee's public 
   the same pair share an identical tag, since the secret is fixed per pair — reveals "these two rows
   are linked," never to whom, the same class of leak as everything else in this schema.
 - Accepting an invite is exactly `joinExistingSession` — the invite only ever needed to deliver a
-  `JoinPayload` privately; nothing about joining itself is new. Rejecting (invitee) or canceling
-  (inviter, only while they still hold the row id from just having sent it) is a delete, gated only
-  by whichever side can derive the tag to begin with — see the note below on why that's not enforced
-  any harder than that.
+  `JoinPayload` privately; nothing about joining itself is new. Rejecting (invitee) or **undoing**
+  (inviter — not "canceling": it only works while they still hold the row id in memory from just
+  having sent it, gone on refresh, since the row has no owner reference for a later visit to
+  reconstruct) is a delete, gated only by whichever side can derive the tag to begin with — see the
+  note below on why that's not enforced any harder than that. The inviter's own client resolves and
+  shows the recipient's username right after sending ("Invite sent to ava") by looking up the exact
+  public key it just pasted — no new leak, since the inviter already holds that key itself.
 
 **Deletion is client-checked only, same as every other write in this schema.** RLS can check row
 contents and connection metadata, not a cryptographic proof — Postgres has no built-in way to verify
@@ -395,6 +398,39 @@ introduces; it's the same one every table has always had. Deleting a `session_in
 forge or read anything either way — worst case is losing an invite before it's seen, which can just
 be re-sent — so it's an acceptable place to leave client-checked, consistent with the already-
 documented "restricting invite-link minting to the owner" gap.
+
+**"Adopt an alias" is the mirror of "+ Add to account," from the other side.** The original migration
+flow requires opening the *guest's* personal link and clicking "+ Add to account" from there.
+`SessionView.vue`'s "Adopt an alias" (account-backed `sessionId` routes only) does the same
+`migrateGuestSessionToAccount` call, just triggered from the account's own view instead: paste the
+guest identity's *private* key directly (the same key its Warning button reveals), and the account
+recognizes it as itself without ever switching views. No new mechanism — same merge, same
+non-destructive semantics, just a second entry point into it. A separate "Logged in as `<username>`"
+control (also `sessionId`-only) shows the current session's adopted aliases, resolved via the exact
+same `sessionAliasKeys`/`nameFor` state already loaded to render the thread — no new fetch, per the
+same reasoning that ruled out a global, cross-session aliases view (see below).
+
+**Why there's no account-wide "list of my aliases" page.** A global view would need its own fetch —
+"give me every alias this account has ever adopted, across every session" — and that fetch would
+itself be a new, distinguishable network event, exactly the kind of pattern this schema has
+otherwise avoided (see the username-lookup rejection above). Each session's aliases already ride
+inside that session's own `session_access` payload, which the account was going to decrypt anyway to
+open the session — so surfacing them only *inside* an already-open session costs nothing extra,
+while a cross-session aggregation would cost something new. Scope stays per-session on purpose.
+
+**Honest limitation: this protects database *content*, not network-level traffic patterns.** Nothing
+here stops a party with visibility into requests reaching the server — the hosting operator, or
+anyone watching network traffic to it — from observing "this IP repeatedly fetches rows tagged with
+this `owner_pub`" or "these two IPs both touch this session's rows," independent of anything being
+encrypted. That correlation isn't nothing: `createAccount` sends a plaintext username at account
+creation, and `fetchSessionAccessForOwner` is called with the *same stable* tag every time that
+account checks its chat list — so a single moment where an IP is tied to a username (a signup
+record, an ISP log, a coffee-shop WiFi sheet) can retroactively connect that IP's entire request
+history back to everything its tag ever touched. This is a traffic-analysis problem, not a database
+one, and the schema's design (hidden membership graph, no plaintext identity columns) does nothing to
+address it — the only real mitigation is the user's own choice to connect through a VPN or Tor, which
+changes what IP the server sees in the first place. Incognito/private browsing mode does not help
+here: it only affects local browser storage, not what the server observes over the network.
 
 **What the server can and can't see:** ciphertext is opaque, exactly as before. What's new here is
 that the *membership graph itself* — which sessions a given identity/account touches — is opaque
@@ -443,16 +479,19 @@ Organized by feature. Keep them thin — mostly templating, logic lives in `lib/
 ```
 src/components/
   HelpModal.vue       renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
-  SessionHome.vue     logged-out home: "Start a session" + paste-a-link box + "Create an account"
+  SessionHome.vue     logged-out home: "Start a session", paste-a-link box, "Create an account", and
+                      "Log in" (accepts a full account link, any origin, or just the bare key)
   AccountHome.vue     logged-in home: chat list sorted by latest activity (src/api/sessionList.ts),
                       "My public key" (share for a session_invites-based invite), pending invites,
                       + "Start a session"
   CreateAccount.vue   generate an account keypair + username, reveal its one-time account link
   JoinSession.vue     redeem an invite link as the logged-in account, a guest, or by logging in
                       on the spot (pasting an account link) — all via sessionActions.ts
-  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId,
-                      a guest route can migrate to an account in place ("+ Add to account"), and
-                      any participant can "Invite by key" (src/api/inviteActions.ts)
+  SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId. A
+                      guest route can migrate to an account in place ("+ Add to account"); an
+                      account route can adopt a guest identity from its own side ("Adopt an alias")
+                      and see this session's adopted aliases ("Logged in as <username>"). Any
+                      participant, on either route, can "Invite by key" (src/api/inviteActions.ts)
 ```
 
 ## §7 — Build, Deploy & Conventions

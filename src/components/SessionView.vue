@@ -25,7 +25,7 @@ import {
 } from '../api/sessions'
 import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
-import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
+import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash, extractPackedKey } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
 import { isIdentityMerged, migrateGuestSessionToAccount } from '../api/sessionActions'
@@ -70,6 +70,11 @@ let ownRole: 'owner' | 'member' = 'member'
 // recognizes its old, pinned guest key as its own (see identityPublicKeyId
 // in lib/sessionTypes.ts).
 let myKeys = new Set<string>()
+// Reactive mirror of the guest keys folded into myKeys (never includes
+// ownPublicKeyId itself) — kept separate from the plain Set above so the
+// hot per-message `.has()` check in decodeAndAppend stays cheap, while this
+// still drives the "logged in as" aliases panel reactively.
+const sessionAliasKeys = ref<string[]>([])
 
 // Sender display names are resolved per-message from `sender` alone, live
 // against `accounts`, with a deterministic (no-lookup) fallback for a key
@@ -175,6 +180,7 @@ onMounted(async () => {
       // extends "mine" to also cover messages sent before migration.
       ownPublicKeyId = currentAccount.value!.publicKeyId
       myKeys = new Set([ownPublicKeyId, ...(access.identityPublicKeyIds ?? [])])
+      sessionAliasKeys.value = access.identityPublicKeyIds ?? []
     } else if (currentAccount.value) {
       // Viewing a guest link while already logged in — check whether *this*
       // guest identity specifically has already been merged in, so "Add to
@@ -254,10 +260,9 @@ async function generateInvite() {
 }
 
 async function toggleInvite() {
-  showWarning.value = false
-  showMigrate.value = false
-  showInviteByKey.value = false
-  showInvite.value = !showInvite.value
+  const opening = !showInvite.value
+  closeAllPanels()
+  showInvite.value = opening
   if (showInvite.value && !inviteLink.value) await generateInvite()
 }
 
@@ -277,13 +282,13 @@ const inviteByKeyInput = ref('')
 const invitingByKey = ref(false)
 const inviteByKeyError = ref('')
 const lastInviteId = ref<string | null>(null)
-const cancelingInvite = ref(false)
+const lastInviteRecipient = ref('')
+const undoingInvite = ref(false)
 
 function toggleInviteByKey() {
-  showInvite.value = false
-  showWarning.value = false
-  showMigrate.value = false
-  showInviteByKey.value = !showInviteByKey.value
+  const opening = !showInviteByKey.value
+  closeAllPanels()
+  showInviteByKey.value = opening
   inviteByKeyError.value = ''
 }
 
@@ -303,6 +308,10 @@ async function sendInviteByKey() {
       return
     }
     lastInviteId.value = created.id
+    // The inviter already holds this exact key (they just pasted it), so
+    // naming who it belongs to here reveals nothing new to anyone else.
+    const targetAccount = await fetchAccountByPublicKey(canonicalPublicKeyId(targetPublicKeyJwk))
+    lastInviteRecipient.value = targetAccount?.username ?? 'that key'
     inviteByKeyInput.value = ''
   } catch (err) {
     logDebug(`sendInviteByKey failed: ${err}`, 'error')
@@ -312,15 +321,21 @@ async function sendInviteByKey() {
   }
 }
 
-/** Only cancelable right after sending, in this same session view — see rejectInvite's doc comment. */
-async function cancelLastInvite() {
+/**
+ * Not a real cancel — an undo. It only works while this exact invite is
+ * still in memory, right here, right after sending; refresh the page and
+ * there's nothing left to undo (see rejectInvite's doc comment — the row
+ * itself has no owner reference for a later session to reconstruct).
+ */
+async function undoLastInvite() {
   if (!lastInviteId.value) return
-  cancelingInvite.value = true
+  undoingInvite.value = true
   try {
     await rejectInvite(lastInviteId.value)
     lastInviteId.value = null
+    lastInviteRecipient.value = ''
   } finally {
-    cancelingInvite.value = false
+    undoingInvite.value = false
   }
 }
 
@@ -332,10 +347,9 @@ const personalLink = props.packedKey ? `${location.origin}${location.pathname}#/
 const copiedPersonal = ref(false)
 
 function toggleWarning() {
-  showInvite.value = false
-  showMigrate.value = false
-  showInviteByKey.value = false
-  showWarning.value = !showWarning.value
+  const opening = !showWarning.value
+  closeAllPanels()
+  showWarning.value = opening
 }
 
 async function copyPersonal() {
@@ -354,10 +368,9 @@ const migrateError = ref('')
 const migrateAccountLinkInput = ref('')
 
 function toggleMigrate() {
-  showInvite.value = false
-  showWarning.value = false
-  showInviteByKey.value = false
-  showMigrate.value = !showMigrate.value
+  const opening = !showMigrate.value
+  closeAllPanels()
+  showMigrate.value = opening
   migrateError.value = ''
 }
 
@@ -410,13 +423,80 @@ async function loginThenMigrate() {
   await migrateToAccount()
 }
 
-function onDocClick(e: MouseEvent) {
-  if (panelArea.value && !panelArea.value.contains(e.target as Node)) {
-    showInvite.value = false
-    showWarning.value = false
-    showMigrate.value = false
-    showInviteByKey.value = false
+// "Adopt an alias" is the mirror of "+ Add to account", from the other
+// side: instead of opening a guest link and clicking "add to account", you
+// stay on the account's own mysession view and paste the guest identity's
+// *private* key directly (e.g. from that link's Warning button). Only
+// applies to an account-backed (sessionId) route — the packedKey route's
+// own identity is already the thing being adopted, from the other flow.
+const showAdoptAlias = ref(false)
+const adoptAliasInput = ref('')
+const adoptingAlias = ref(false)
+const adoptAliasError = ref('')
+
+function toggleAdoptAlias() {
+  const opening = !showAdoptAlias.value
+  closeAllPanels()
+  showAdoptAlias.value = opening
+  adoptAliasError.value = ''
+}
+
+async function adoptAlias() {
+  if (!currentAccount.value || !sessionKeyJwk) return
+  const pasted = adoptAliasInput.value.trim()
+  if (!pasted) return
+
+  adoptingAlias.value = true
+  adoptAliasError.value = ''
+  try {
+    const privateKeyJwk = unpackJwk(extractPackedKey(pasted))
+    const guestPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
+
+    const ok = await migrateGuestSessionToAccount(activeSessionId, sessionKeyJwk, ownRole, guestPublicKeyId, currentAccount.value)
+    if (!ok) {
+      adoptAliasError.value = 'Could not adopt that alias — try again.'
+      return
+    }
+    if (!myKeys.has(guestPublicKeyId)) {
+      myKeys.add(guestPublicKeyId)
+      sessionAliasKeys.value = [...sessionAliasKeys.value, guestPublicKeyId]
+      // Re-render any already-decoded messages from this key as "mine" now,
+      // without needing to reload the whole thread.
+      messages.value = messages.value.map((m) => (m.sender === guestPublicKeyId ? { ...m, mine: true } : m))
+    }
+    showAdoptAlias.value = false
+    adoptAliasInput.value = ''
+  } catch (err) {
+    logDebug(`adoptAlias failed: ${err}`, 'error')
+    adoptAliasError.value = "That doesn't look like a private key or personal link — check you copied the whole thing."
+  } finally {
+    adoptingAlias.value = false
   }
+}
+
+// "Logged in as" + this session's aliases — only meaningful on an
+// account-backed (sessionId) route; a guest route's identity has no
+// separate "logged in as" concept. Reuses sessionAliasKeys/nameFor, both
+// already populated to render the thread — no new fetch.
+const showAliases = ref(false)
+
+function toggleAliases() {
+  const opening = !showAliases.value
+  closeAllPanels()
+  showAliases.value = opening
+}
+
+function closeAllPanels() {
+  showInvite.value = false
+  showInviteByKey.value = false
+  showWarning.value = false
+  showMigrate.value = false
+  showAdoptAlias.value = false
+  showAliases.value = false
+}
+
+function onDocClick(e: MouseEvent) {
+  if (panelArea.value && !panelArea.value.contains(e.target as Node)) closeAllPanels()
 }
 onMounted(() => document.addEventListener('click', onDocClick))
 onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
@@ -430,8 +510,18 @@ function goHome() {
   <div class="session">
     <div class="top-bar">
       <button class="chip" @click="goHome">← Home</button>
+      <button
+        v-if="status === 'ready' && props.sessionId && currentAccount"
+        class="chip"
+        @click.stop="toggleAliases"
+      >
+        Logged in as {{ currentAccount.account.username }}
+      </button>
       <button v-if="status === 'ready'" class="chip" @click.stop="toggleInvite">Invite</button>
       <button v-if="status === 'ready'" class="chip" @click.stop="toggleInviteByKey">Invite by key</button>
+      <button v-if="status === 'ready' && props.sessionId" class="chip" @click.stop="toggleAdoptAlias">
+        Adopt an alias
+      </button>
       <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip" @click.stop="toggleMigrate">
         + Add to account
       </button>
@@ -472,11 +562,40 @@ function goHome() {
         </button>
         <p v-if="inviteByKeyError" class="error">{{ inviteByKeyError }}</p>
         <div v-if="lastInviteId" class="hint">
-          Invite sent.
-          <button class="new-link" :disabled="cancelingInvite" @click="cancelLastInvite">
-            {{ cancelingInvite ? 'Canceling…' : 'Cancel it' }}
+          Invite sent to {{ lastInviteRecipient }}.
+          <button class="new-link" :disabled="undoingInvite" @click="undoLastInvite">
+            {{ undoingInvite ? 'Undoing…' : 'Undo' }}
           </button>
         </div>
+      </div>
+
+      <div v-if="showAdoptAlias" class="link-block">
+        <label>Adopt an alias</label>
+        <p class="hint">
+          Paste a guest identity's private key (e.g. from that link's ⚠ Warning button) to recognize
+          it as you in this session — its old and new messages will render as yours here, without
+          touching that link or anyone else's view of it.
+        </p>
+        <input
+          v-model="adoptAliasInput"
+          placeholder="Paste their private key or personal link"
+          @keydown.enter="adoptAlias"
+        />
+        <button class="primary" :disabled="adoptingAlias || !adoptAliasInput.trim()" @click="adoptAlias">
+          {{ adoptingAlias ? 'Adopting…' : 'Adopt alias' }}
+        </button>
+        <p v-if="adoptAliasError" class="error">{{ adoptAliasError }}</p>
+      </div>
+
+      <div v-if="showAliases" class="link-block">
+        <label>Your aliases in this session</label>
+        <p v-if="sessionAliasKeys.length" class="hint">
+          Messages from these senders in this thread are also you:
+        </p>
+        <ul v-if="sessionAliasKeys.length" class="alias-list">
+          <li v-for="key in sessionAliasKeys" :key="key">{{ nameFor(key) }}</li>
+        </ul>
+        <p v-else class="hint">No other aliases adopted into this session yet.</p>
       </div>
 
       <div v-if="showWarning" class="link-block warning-block">
@@ -614,6 +733,12 @@ function goHome() {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.8rem;
+}
+
+.alias-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.85rem;
 }
 
 .link-row {

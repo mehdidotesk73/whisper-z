@@ -160,8 +160,47 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   Also considered and rejected as disproportionate for this app's scale: anchoring a hash-chained
   history on an external blockchain for tamper evidence — the cheaper, sufficient version is
   participants cross-checking a hash with each other directly, no external chain needed
-- See "Session list sorted by latest activity" and "Adding an existing account to a session by
-  public key" in `docs/system-design.md` §3 for the full design
+- **Added:** a "Log in" option on the logged-out home (`SessionHome.vue`) — there was previously no
+  direct way to sign back into an account without routing through an unrelated flow (joining,
+  migrating). `extractAccountKey` (`src/lib/route.ts`) accepts a full account link on any origin
+  (a preview deploy or production) or just the bare packed key, falling back to treating the whole
+  trimmed input as the key when it doesn't parse as a route
+- **Fixed a real regression, found through live device testing of the above:** pasting a real
+  account link failed with `DataError: Data provided to an operation does not meet requirements`.
+  Root cause: adding `deriveBits` usage to `generateKeyPair` for the invite mechanism meant
+  `importPrivateKey` started requesting `['deriveKey', 'deriveBits']` on every import, but WebCrypto's
+  JWK import rejects a request for any usage not already listed in the JWK's own `key_ops` — and
+  every key exported before this branch has `key_ops: ['deriveKey']` only. This broke *every*
+  pre-existing identity, not just accounts: guest personal links and the "log in and migrate/join"
+  flows all import through the same function. Fixed by stripping `key_ops` before importing — it's
+  bookkeeping this app itself attached at export time, not a real cryptographic restriction, so it's
+  safe to drop and let the current usage list apply regardless of when the key was created. Verified
+  with a standalone script reproducing the exact failure against an old-style JWK, confirming the
+  fix succeeds where the pre-fix import throws the identical error
+- **Added, after live testing surfaced the gap:** the invite-sent confirmation now names the
+  recipient ("Invite sent to ava," resolved from the exact key just pasted — no new leak, since the
+  inviter already holds it) and "Cancel it" was renamed "Undo," since that's what it actually is: it
+  only works while the invite is still held in the inviter's own memory from just having sent it, not
+  a real, always-available cancel (the row has no owner reference for a later visit to reconstruct).
+  A persistent local list of sent invites was considered and explicitly rejected — undo-in-memory is
+  the honest scope, matching what the design can actually support
+- **Added:** "Adopt an alias" (`SessionView.vue`, account-backed routes) — the mirror of "+ Add to
+  account" from the other side: paste a guest identity's private key directly, from the account's own
+  session view, instead of needing to open that guest's link first. Same `migrateGuestSessionToAccount`
+  call, just a second entry point. Paired with a per-session "Logged in as `<username>`" control
+  showing which senders in *that* session are adopted aliases — deliberately scoped to the
+  currently-open session rather than a global, cross-session list, after working through why a global
+  version would need its own new, distinguishable fetch (see `docs/system-design.md` §3's "Why
+  there's no account-wide list of my aliases")
+- **Documented, not fixed — a real, distinct gap surfaced through review:** this schema hides the
+  membership graph from anyone with only database *content* access, but does nothing about
+  network/IP-level traffic correlation — an operator or network observer can still see "this IP
+  repeatedly touches this stable tag," and one moment of IP-to-identity linkage (a signup, an ISP
+  log) connects backwards to everything that IP/tag ever touched. VPN/Tor is the real mitigation,
+  and it's the user's choice to make, not something this app provides
+- See "Session list sorted by latest activity," "Adding an existing account to a session by
+  public key," and "'Adopt an alias' is the mirror of '+ Add to account'" in `docs/system-design.md`
+  §3 for the full design
 
 ### v0.6.0 — 2026-08-28 (Stage C: guest → account migration)
 - **Added:** `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) — adds an account's own

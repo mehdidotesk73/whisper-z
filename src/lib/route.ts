@@ -58,6 +58,18 @@ export function extractAccountKey(pasted: string): string {
   return parsed.name === 'account' ? parsed.packedKey : pasted.trim()
 }
 
+/**
+ * Same idea as extractAccountKey, but for pasting *any* packed private
+ * key — a guest's personal link (`#/session/<key>`, e.g. from the Warning
+ * button), an account link, or the bare key itself. Used where the caller
+ * doesn't care which kind of identity it is, only that it's a private key.
+ */
+export function extractPackedKey(pasted: string): string {
+  const parsed = parseHash(extractHash(pasted))
+  if (parsed.name === 'session' || parsed.name === 'account') return parsed.packedKey
+  return pasted.trim()
+}
+
 export const route = ref<Route>(parseHash(window.location.hash))
 
 window.addEventListener('hashchange', () => {

@@ -26,8 +26,19 @@ export async function importPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
   return crypto.subtle.importKey('jwk', jwk, ECDH_PARAMS, true, [])
 }
 
+/**
+ * Strips `key_ops` before importing: a JWK exported before `deriveBits` was
+ * added to `generateKeyPair` (every account/guest identity created before
+ * this feature) carries `key_ops: ['deriveKey']` only, and WebCrypto's JWK
+ * import rejects a request for any usage not already listed there —
+ * `key_ops` here is bookkeeping we ourselves attached at export time, not a
+ * real cryptographic restriction (the key material doesn't care), so this
+ * is safe to relax on our own read path. Without this, every identity
+ * created before this branch fails to log back in at all.
+ */
 export async function importPrivateKey(jwk: JsonWebKey): Promise<CryptoKey> {
-  return crypto.subtle.importKey('jwk', jwk, ECDH_PARAMS, true, ['deriveKey', 'deriveBits'])
+  const { key_ops: _key_ops, ...rest } = jwk
+  return crypto.subtle.importKey('jwk', rest, ECDH_PARAMS, true, ['deriveKey', 'deriveBits'])
 }
 
 /** An EC private key's JWK already contains its public half (x, y) — no separate export needed. */

@@ -249,16 +249,28 @@ const inviteLink = ref('')
 const copiedInvite = ref(false)
 
 async function generateInvite() {
-  if (!sessionKeyJwk) return
+  logDebug('generateInvite: start')
+  if (!sessionKeyJwk) {
+    logDebug('generateInvite: no sessionKeyJwk, aborting', 'warn')
+    return
+  }
   copiedInvite.value = false
   inviteLink.value = ''
-  const secretBytes = generateJoinSecret()
-  const joinKey = await importJoinKey(secretBytes)
-  const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
-  const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
-  const joinId = await createJoinAccess({ ciphertext, iv })
-  if (!joinId) return
-  inviteLink.value = `${location.origin}${location.pathname}${joinHash(joinId, bytesToUrlSafe(secretBytes))}`
+  try {
+    const secretBytes = generateJoinSecret()
+    const joinKey = await importJoinKey(secretBytes)
+    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+    const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
+    const joinId = await createJoinAccess({ ciphertext, iv })
+    if (!joinId) {
+      logDebug('generateInvite: createJoinAccess returned no id', 'warn')
+      return
+    }
+    inviteLink.value = `${location.origin}${location.pathname}${joinHash(joinId, bytesToUrlSafe(secretBytes))}`
+    logDebug('generateInvite: link ready')
+  } catch (err) {
+    logDebug(`generateInvite failed: ${err}`, 'error')
+  }
 }
 
 async function copyInvite() {
@@ -433,15 +445,19 @@ function toggleAliases() {
 // running the selected option's action together, so there's nothing here to
 // get out of sync.
 async function openInviteModal() {
+  logDebug('openInviteModal: called')
   closeAllPanels()
   showInvite.value = true
+  logDebug(`openInviteModal: showInvite=${showInvite.value}`)
   if (!inviteLink.value) await generateInvite()
 }
 
 function openInviteByKeyModal() {
+  logDebug('openInviteByKeyModal: called')
   closeAllPanels()
   showInviteByKey.value = true
   inviteByKeyError.value = ''
+  logDebug(`openInviteByKeyModal: showInviteByKey=${showInviteByKey.value}`)
 }
 
 function closeAllPanels() {
@@ -453,7 +469,10 @@ function closeAllPanels() {
 }
 
 function onDocClick(e: MouseEvent) {
-  if (panelArea.value && !panelArea.value.contains(e.target as Node)) closeAllPanels()
+  if (panelArea.value && !panelArea.value.contains(e.target as Node)) {
+    logDebug('SessionView: outside click, closing panels')
+    closeAllPanels()
+  }
 }
 onMounted(() => document.addEventListener('click', onDocClick))
 onBeforeUnmount(() => document.removeEventListener('click', onDocClick))

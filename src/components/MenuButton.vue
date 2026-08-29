@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { logDebug } from '../debug'
 
 // A trigger button that opens a small options popover. Selecting an option
 // always closes the popover and then runs that option's action — the two
@@ -9,22 +10,25 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 // Outside-click detection is scoped to this component's own root, not a
 // page-wide area, so it can never race with unrelated panel-closing logic
 // elsewhere on the page.
-defineProps<{ label: string; tone?: string }>()
+const props = defineProps<{ label: string; tone?: string }>()
 
 const open = ref(false)
 const root = ref<HTMLElement>()
 
 function toggle() {
   open.value = !open.value
+  logDebug(`MenuButton[${props.label}]: toggle -> open=${open.value}`)
 }
 
 function select(action: () => void) {
+  logDebug(`MenuButton[${props.label}]: option selected, closing and running action`)
   open.value = false
   action()
 }
 
 function onDocClick(e: MouseEvent) {
   if (open.value && root.value && !root.value.contains(e.target as Node)) {
+    logDebug(`MenuButton[${props.label}]: outside click, closing`)
     open.value = false
   }
 }

@@ -25,13 +25,14 @@ import {
 } from '../api/sessions'
 import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
-import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash, extractPackedKey } from '../lib/route'
+import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
 import { isIdentityMerged, migrateGuestSessionToAccount } from '../api/sessionActions'
 import { createSessionInvite, rejectInvite } from '../api/inviteActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
+import Modal from './Modal.vue'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
 // Either a guest personal-link key, or an account's session id (looked up
@@ -259,13 +260,6 @@ async function generateInvite() {
   inviteLink.value = `${location.origin}${location.pathname}${joinHash(joinId, bytesToUrlSafe(secretBytes))}`
 }
 
-async function toggleInvite() {
-  const opening = !showInvite.value
-  closeAllPanels()
-  showInvite.value = opening
-  if (showInvite.value && !inviteLink.value) await generateInvite()
-}
-
 async function copyInvite() {
   if (await copyToClipboard(inviteLink.value)) {
     copiedInvite.value = true
@@ -284,13 +278,6 @@ const inviteByKeyError = ref('')
 const lastInviteId = ref<string | null>(null)
 const lastInviteRecipient = ref('')
 const undoingInvite = ref(false)
-
-function toggleInviteByKey() {
-  const opening = !showInviteByKey.value
-  closeAllPanels()
-  showInviteByKey.value = opening
-  inviteByKeyError.value = ''
-}
 
 async function sendInviteByKey() {
   if (!ownPrivateKey || !sessionKeyJwk) return
@@ -423,61 +410,14 @@ async function loginThenMigrate() {
   await migrateToAccount()
 }
 
-// "Adopt an alias" is the mirror of "+ Add to account", from the other
-// side: instead of opening a guest link and clicking "add to account", you
-// stay on the account's own mysession view and paste the guest identity's
-// *private* key directly (e.g. from that link's Warning button). Only
-// applies to an account-backed (sessionId) route — the packedKey route's
-// own identity is already the thing being adopted, from the other flow.
-const showAdoptAlias = ref(false)
-const adoptAliasInput = ref('')
-const adoptingAlias = ref(false)
-const adoptAliasError = ref('')
-
-function toggleAdoptAlias() {
-  const opening = !showAdoptAlias.value
-  closeAllPanels()
-  showAdoptAlias.value = opening
-  adoptAliasError.value = ''
-}
-
-async function adoptAlias() {
-  if (!currentAccount.value || !sessionKeyJwk) return
-  const pasted = adoptAliasInput.value.trim()
-  if (!pasted) return
-
-  adoptingAlias.value = true
-  adoptAliasError.value = ''
-  try {
-    const privateKeyJwk = unpackJwk(extractPackedKey(pasted))
-    const guestPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
-
-    const ok = await migrateGuestSessionToAccount(activeSessionId, sessionKeyJwk, ownRole, guestPublicKeyId, currentAccount.value)
-    if (!ok) {
-      adoptAliasError.value = 'Could not adopt that alias — try again.'
-      return
-    }
-    if (!myKeys.has(guestPublicKeyId)) {
-      myKeys.add(guestPublicKeyId)
-      sessionAliasKeys.value = [...sessionAliasKeys.value, guestPublicKeyId]
-      // Re-render any already-decoded messages from this key as "mine" now,
-      // without needing to reload the whole thread.
-      messages.value = messages.value.map((m) => (m.sender === guestPublicKeyId ? { ...m, mine: true } : m))
-    }
-    showAdoptAlias.value = false
-    adoptAliasInput.value = ''
-  } catch (err) {
-    logDebug(`adoptAlias failed: ${err}`, 'error')
-    adoptAliasError.value = "That doesn't look like a private key or personal link — check you copied the whole thing."
-  } finally {
-    adoptingAlias.value = false
-  }
-}
-
 // "Logged in as" + this session's aliases — only meaningful on an
 // account-backed (sessionId) route; a guest route's identity has no
 // separate "logged in as" concept. Reuses sessionAliasKeys/nameFor, both
-// already populated to render the thread — no new fetch.
+// already populated to render the thread — no new fetch. Adopting an alias
+// itself now lives on AccountHome's "Account" menu (see
+// api/sessionActions.ts's adoptGuestIdentity) — it works from anywhere, not
+// just from inside the session it belongs to, so it no longer needs a
+// button here at all.
 const showAliases = ref(false)
 
 function toggleAliases() {
@@ -486,13 +426,35 @@ function toggleAliases() {
   showAliases.value = opening
 }
 
+// Invite menu: a small popover offering the two ways to invite, each
+// opening its panel in a modal rather than inline.
+const showInviteMenu = ref(false)
+
+function toggleInviteMenu() {
+  showInviteMenu.value = !showInviteMenu.value
+}
+
+async function openInviteModal() {
+  showInviteMenu.value = false
+  closeAllPanels()
+  showInvite.value = true
+  if (!inviteLink.value) await generateInvite()
+}
+
+function openInviteByKeyModal() {
+  showInviteMenu.value = false
+  closeAllPanels()
+  showInviteByKey.value = true
+  inviteByKeyError.value = ''
+}
+
 function closeAllPanels() {
   showInvite.value = false
   showInviteByKey.value = false
   showWarning.value = false
   showMigrate.value = false
-  showAdoptAlias.value = false
   showAliases.value = false
+  showInviteMenu.value = false
 }
 
 function onDocClick(e: MouseEvent) {
@@ -508,94 +470,33 @@ function goHome() {
 
 <template>
   <div class="session">
-    <div class="top-bar">
-      <button class="chip" @click="goHome">← Home</button>
-      <button
-        v-if="status === 'ready' && props.sessionId && currentAccount"
-        class="chip"
-        @click.stop="toggleAliases"
-      >
-        Logged in as {{ currentAccount.account.username }}
-      </button>
-      <button v-if="status === 'ready'" class="chip" @click.stop="toggleInvite">Invite</button>
-      <button v-if="status === 'ready'" class="chip" @click.stop="toggleInviteByKey">Invite by key</button>
-      <button v-if="status === 'ready' && props.sessionId" class="chip" @click.stop="toggleAdoptAlias">
-        Adopt an alias
-      </button>
-      <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip" @click.stop="toggleMigrate">
-        + Add to account
-      </button>
-      <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
-    </div>
-
     <div ref="panelArea">
-      <div v-if="showInvite" class="link-block">
-        <label>Invite link</label>
-        <p class="hint">
-          Send this to someone so they can join. It works once and expires in 10 minutes — generate
-          a new one for the next person.
-        </p>
-        <div class="link-row">
-          <input
-            readonly
-            :value="inviteLink || 'Generating…'"
-            @focus="($event.target as HTMLInputElement).select()"
-          />
-          <button :disabled="!inviteLink" @click="copyInvite">{{ copiedInvite ? 'Copied ✓' : 'Copy' }}</button>
-        </div>
-        <button class="new-link" :disabled="!inviteLink" @click="generateInvite">New link, for another person</button>
+      <div class="top-bar-row">
+        <button class="chip-ghost tone-neutral" @click="goHome">← Home</button>
       </div>
 
-      <div v-if="showInviteByKey" class="link-block">
-        <label>Invite by key</label>
-        <p class="hint">
-          Paste a public key someone shared with you directly (in person, or however you already
-          trust) to add them to this session — no link needed.
-        </p>
-        <input
-          v-model="inviteByKeyInput"
-          placeholder="Paste their public key"
-          @keydown.enter="sendInviteByKey"
-        />
-        <button class="primary" :disabled="invitingByKey || !inviteByKeyInput.trim()" @click="sendInviteByKey">
-          {{ invitingByKey ? 'Sending…' : 'Send invite' }}
-        </button>
-        <p v-if="inviteByKeyError" class="error">{{ inviteByKeyError }}</p>
-        <div v-if="lastInviteId" class="hint">
-          Invite sent to {{ lastInviteRecipient }}.
-          <button class="new-link" :disabled="undoingInvite" @click="undoLastInvite">
-            {{ undoingInvite ? 'Undoing…' : 'Undo' }}
-          </button>
+      <div class="top-bar-row identity-row">
+        <span
+          v-if="status === 'ready' && props.sessionId && currentAccount"
+          class="whoami-text"
+          @click.stop="toggleAliases"
+        >
+          Signed in as <strong>{{ currentAccount.account.username }}</strong>
+        </span>
+        <div v-if="status === 'ready'" class="menu-wrap invite-menu-wrap">
+          <button class="chip-ghost tone-blue" @click.stop="toggleInviteMenu">Invite ▾</button>
+          <div v-if="showInviteMenu" class="menu-pop">
+            <button class="menu-item" @click="openInviteModal">By join link</button>
+            <button class="menu-item" @click="openInviteByKeyModal">By public key</button>
+          </div>
         </div>
       </div>
 
-      <div v-if="showAdoptAlias" class="link-block">
-        <label>Adopt an alias</label>
-        <p class="hint">
-          Paste a guest identity's private key (e.g. from that link's ⚠ Warning button) to recognize
-          it as you in this session — its old and new messages will render as yours here, without
-          touching that link or anyone else's view of it.
-        </p>
-        <input
-          v-model="adoptAliasInput"
-          placeholder="Paste their private key or personal link"
-          @keydown.enter="adoptAlias"
-        />
-        <button class="primary" :disabled="adoptingAlias || !adoptAliasInput.trim()" @click="adoptAlias">
-          {{ adoptingAlias ? 'Adopting…' : 'Adopt alias' }}
+      <div class="top-bar">
+        <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip" @click.stop="toggleMigrate">
+          + Add to account
         </button>
-        <p v-if="adoptAliasError" class="error">{{ adoptAliasError }}</p>
-      </div>
-
-      <div v-if="showAliases" class="link-block">
-        <label>Your aliases in this session</label>
-        <p v-if="sessionAliasKeys.length" class="hint">
-          Messages from these senders in this thread are also you:
-        </p>
-        <ul v-if="sessionAliasKeys.length" class="alias-list">
-          <li v-for="key in sessionAliasKeys" :key="key">{{ nameFor(key) }}</li>
-        </ul>
-        <p v-else class="hint">No other aliases adopted into this session yet.</p>
+        <button v-if="status === 'ready' && props.packedKey && !migrated" class="chip warning" @click.stop="toggleWarning">⚠ Warning</button>
       </div>
 
       <div v-if="showWarning" class="link-block warning-block">
@@ -635,6 +536,46 @@ function goHome() {
         <p v-if="migrateError" class="error">{{ migrateError }}</p>
       </div>
     </div>
+
+    <Modal :open="showInvite" title="Invite link" @close="showInvite = false">
+      <p class="hint">
+        Send this to someone so they can join. It works once and expires in 10 minutes — generate a
+        new one for the next person.
+      </p>
+      <div class="link-row">
+        <input readonly :value="inviteLink || 'Generating…'" @focus="($event.target as HTMLInputElement).select()" />
+        <button :disabled="!inviteLink" @click="copyInvite">{{ copiedInvite ? 'Copied ✓' : 'Copy' }}</button>
+      </div>
+      <button class="new-link" :disabled="!inviteLink" @click="generateInvite">New link, for another person</button>
+    </Modal>
+
+    <Modal :open="showInviteByKey" title="Invite by key" @close="showInviteByKey = false">
+      <p class="hint">
+        Paste a public key someone shared with you directly (in person, or however you already
+        trust) to add them to this session — no link needed.
+      </p>
+      <input v-model="inviteByKeyInput" placeholder="Paste their public key" @keydown.enter="sendInviteByKey" />
+      <button class="primary" :disabled="invitingByKey || !inviteByKeyInput.trim()" @click="sendInviteByKey">
+        {{ invitingByKey ? 'Sending…' : 'Send invite' }}
+      </button>
+      <p v-if="inviteByKeyError" class="error">{{ inviteByKeyError }}</p>
+      <div v-if="lastInviteId" class="hint">
+        Invite sent to {{ lastInviteRecipient }}.
+        <button class="new-link" :disabled="undoingInvite" @click="undoLastInvite">
+          {{ undoingInvite ? 'Undoing…' : 'Undo' }}
+        </button>
+      </div>
+    </Modal>
+
+    <Modal :open="showAliases" title="Your aliases in this session" @close="showAliases = false">
+      <p v-if="sessionAliasKeys.length" class="hint">Messages from these senders in this thread are also you:</p>
+      <ul v-if="sessionAliasKeys.length" class="alias-list">
+        <li v-for="key in sessionAliasKeys" :key="key">{{ nameFor(key) }}</li>
+      </ul>
+      <p v-else class="hint">
+        No other aliases adopted into this session yet — adopt one from your account's "Account" menu.
+      </p>
+    </Modal>
 
     <p v-if="status === 'loading'" class="status">Loading…</p>
     <p v-else-if="status === 'not-found'" class="status error">
@@ -681,6 +622,26 @@ function goHome() {
   flex-wrap: wrap;
 }
 
+.top-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.identity-row {
+  justify-content: space-between;
+}
+
+.whoami-text {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.whoami-text:hover {
+  color: var(--text);
+}
+
 .chip {
   padding: 0.4rem 0.8rem;
   min-height: 44px;
@@ -699,6 +660,62 @@ function goHome() {
 .chip.warning {
   border-color: var(--danger);
   color: var(--danger);
+}
+
+.chip-ghost {
+  padding: 0.35rem 0.7rem;
+  min-height: 40px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.chip-ghost.tone-neutral {
+  color: var(--text-muted);
+}
+
+.chip-ghost.tone-blue {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.menu-wrap {
+  position: relative;
+}
+
+.invite-menu-wrap {
+  margin-left: auto;
+}
+
+.menu-pop {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  right: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  min-width: 10rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.menu-item {
+  padding: 0.7rem 0.9rem;
+  min-height: 44px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.menu-item:hover {
+  background: var(--bg-elev-2);
 }
 
 .status {
@@ -724,7 +741,8 @@ function goHome() {
   border-color: var(--danger);
 }
 
-.link-block label {
+.link-block label,
+.modal-body label {
   font-weight: 600;
   font-size: 0.9rem;
 }
@@ -783,7 +801,8 @@ function goHome() {
   text-decoration: none;
 }
 
-.link-block input {
+.link-block input,
+.modal-body input {
   padding: 0.6rem;
   min-height: 44px;
   border: 1px solid var(--border);
@@ -793,7 +812,8 @@ function goHome() {
   font-size: 0.9rem;
 }
 
-.link-block .primary {
+.link-block .primary,
+.modal-body .primary {
   align-self: flex-start;
   padding: 0.6rem 1rem;
   min-height: 44px;
@@ -805,11 +825,13 @@ function goHome() {
   font-size: 0.9rem;
 }
 
-.link-block .primary:disabled {
+.link-block .primary:disabled,
+.modal-body .primary:disabled {
   opacity: 0.6;
 }
 
-.link-block .error {
+.link-block .error,
+.modal-body .error {
   color: var(--danger);
   margin: 0;
   font-size: 0.85rem;

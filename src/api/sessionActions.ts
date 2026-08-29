@@ -9,6 +9,8 @@ import {
   generateKeyPair,
   exportPublicKey,
   exportPrivateKey,
+  importPrivateKey,
+  publicJwkFromPrivateJwk,
   generateSessionKey,
   exportSessionKey,
   importSessionKey,
@@ -18,6 +20,7 @@ import {
   openSealed,
   deriveLookupTag,
   packJwk,
+  unpackJwk,
   canonicalPublicKeyId,
 } from '../lib/crypto'
 import {
@@ -30,6 +33,7 @@ import {
   toEnvelope,
   type SessionAccessRow,
 } from './sessions'
+import { extractPackedKey } from '../lib/route'
 import type { SessionAccessPayload, JoinPayload } from '../lib/sessionTypes'
 import type { CurrentAccount } from '../lib/auth'
 
@@ -227,4 +231,27 @@ export async function migrateGuestSessionToAccount(
     await addParticipant(sessionId, participantEntry.ciphertext, participantEntry.iv)
   }
   return true
+}
+
+/**
+ * The account-level entry point for "adopt an alias" — paste any guest
+ * identity's private key (a personal link, or the bare key), and this
+ * figures out which session it belongs to itself, rather than requiring
+ * the account to already be viewing that session. A guest identity holds
+ * exactly one session_access row by construction (a fresh keypair per
+ * visit), so its own lookup tag has exactly one row to open. From the
+ * user's side this is "adopt a guest account" — a single, session-agnostic
+ * action — even though underneath it's still exactly migrateGuestSessionToAccount.
+ */
+export async function adoptGuestIdentity(pasted: string, account: CurrentAccount): Promise<boolean> {
+  const privateKeyJwk = unpackJwk(extractPackedKey(pasted))
+  const guestPrivateKey = await importPrivateKey(privateKeyJwk)
+  const guestPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
+
+  const ownerPub = await deriveLookupTag(guestPrivateKey, 'session-access')
+  const rows = await fetchSessionAccessForOwner(ownerPub)
+  if (!rows.length) return false
+
+  const payload = await openSealed<SessionAccessPayload>(toEnvelope(rows[0]), guestPrivateKey)
+  return migrateGuestSessionToAccount(payload.sessionId, payload.sessionKey, payload.role, guestPublicKeyId, account)
 }

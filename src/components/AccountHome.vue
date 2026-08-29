@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { currentAccount, logout } from '../lib/auth'
-import { startNewSession } from '../api/sessionActions'
+import { startNewSession, adoptGuestIdentity } from '../api/sessionActions'
 import { fetchSessionList, type SessionListItem } from '../api/sessionList'
 import { checkForInvites, acceptInvite, rejectInvite, type PendingInvite } from '../api/inviteActions'
 import { exportPublicKey, packJwk } from '../lib/crypto'
 import { copyToClipboard } from '../lib/clipboard'
 import { mySessionHash, navigate, homeHash, parseHash, extractHash } from '../lib/route'
 import { logDebug } from '../debug'
+import Modal from './Modal.vue'
 
 const items = ref<SessionListItem[]>([])
 const loading = ref(true)
@@ -36,8 +37,6 @@ onMounted(loadList)
 // value in this schema) — someone else pastes it into their own session's
 // "Invite by key" to add me, entirely out of band, no lookup involved.
 const myPublicKeyBlob = ref('')
-const showMyKey = ref(false)
-const copiedMyKey = ref(false)
 const pendingInvites = ref<PendingInvite[]>([])
 const invitesLoading = ref(true)
 const respondingId = ref<string | null>(null)
@@ -55,14 +54,64 @@ onMounted(async () => {
   }
 })
 
-function toggleMyKey() {
-  showMyKey.value = !showMyKey.value
+// Account menu: a small popover with "My public key" and "Adopt guest
+// account" — both open in a modal rather than an inline panel.
+const showAccountMenu = ref(false)
+const showMyKeyModal = ref(false)
+const showAdoptModal = ref(false)
+const copiedMyKey = ref(false)
+
+function toggleAccountMenu() {
+  showAccountMenu.value = !showAccountMenu.value
+}
+
+function openMyKeyModal() {
+  showAccountMenu.value = false
+  showMyKeyModal.value = true
+}
+
+function openAdoptModal() {
+  showAccountMenu.value = false
+  adoptError.value = ''
+  showAdoptModal.value = true
 }
 
 async function copyMyKey() {
   if (await copyToClipboard(myPublicKeyBlob.value)) {
     copiedMyKey.value = true
     setTimeout(() => (copiedMyKey.value = false), 1500)
+  }
+}
+
+// Adopt a guest account: paste any guest identity's private key from
+// anywhere, and adoptGuestIdentity figures out which session it belongs to
+// itself — no need to already be viewing that session. See
+// api/sessionActions.ts's adoptGuestIdentity doc comment.
+const adoptInput = ref('')
+const adopting = ref(false)
+const adoptError = ref('')
+
+async function adoptGuestAccount() {
+  if (!currentAccount.value) return
+  const pasted = adoptInput.value.trim()
+  if (!pasted) return
+
+  adopting.value = true
+  adoptError.value = ''
+  try {
+    const ok = await adoptGuestIdentity(pasted, currentAccount.value)
+    if (!ok) {
+      adoptError.value = "Could not adopt that account — check it's a valid guest personal link or key."
+      return
+    }
+    showAdoptModal.value = false
+    adoptInput.value = ''
+    await loadList() // the adopted session may be new to this account's list
+  } catch (err) {
+    logDebug(`adoptGuestAccount failed: ${err}`, 'error')
+    adoptError.value = "That doesn't look like a private key or personal link — check you copied the whole thing."
+  } finally {
+    adopting.value = false
   }
 }
 
@@ -128,19 +177,34 @@ function onLogout() {
   logout()
   navigate(homeHash)
 }
+
+const accountMenuArea = ref<HTMLElement>()
+function onDocClick(e: MouseEvent) {
+  if (accountMenuArea.value && !accountMenuArea.value.contains(e.target as Node)) {
+    showAccountMenu.value = false
+  }
+}
+onMounted(() => document.addEventListener('click', onDocClick))
+onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 </script>
 
 <template>
   <div class="account-home">
     <div class="top-row">
       <p class="whoami">Signed in as <strong>{{ currentAccount?.account.username }}</strong></p>
-      <div class="top-row-actions">
-        <button class="chip" @click="toggleMyKey">My public key</button>
-        <button class="chip" @click="onLogout">Log out</button>
+      <div ref="accountMenuArea" class="top-row-actions">
+        <div class="menu-wrap">
+          <button class="chip-ghost tone-blue" @click.stop="toggleAccountMenu">Account ▾</button>
+          <div v-if="showAccountMenu" class="menu-pop">
+            <button class="menu-item" @click="openMyKeyModal">My public key</button>
+            <button class="menu-item" @click="openAdoptModal">Adopt guest account</button>
+          </div>
+        </div>
+        <button class="chip-ghost tone-danger" @click="onLogout">Log out</button>
       </div>
     </div>
 
-    <div v-if="showMyKey" class="link-block">
+    <Modal :open="showMyKeyModal" title="My public key" @close="showMyKeyModal = false">
       <p class="hint">
         Share this with someone (in person, or however you already trust) so they can invite you to
         a session directly, without a link.
@@ -149,7 +213,25 @@ function onLogout() {
         <input readonly :value="myPublicKeyBlob" @focus="($event.target as HTMLInputElement).select()" />
         <button @click="copyMyKey">{{ copiedMyKey ? 'Copied ✓' : 'Copy' }}</button>
       </div>
-    </div>
+    </Modal>
+
+    <Modal :open="showAdoptModal" title="Adopt guest account" @close="showAdoptModal = false">
+      <p class="hint">
+        Paste a guest identity's private key (e.g. from that link's ⚠ Warning button) to recognize
+        it as you — its messages will render as yours wherever it appears, without touching that
+        link or anyone else's view of it. Works for any session it's part of; you don't need to open
+        that session first.
+      </p>
+      <input
+        v-model="adoptInput"
+        placeholder="Paste their private key or personal link"
+        @keydown.enter="adoptGuestAccount"
+      />
+      <button class="primary" :disabled="adopting || !adoptInput.trim()" @click="adoptGuestAccount">
+        {{ adopting ? 'Adopting…' : 'Adopt account' }}
+      </button>
+      <p v-if="adoptError" class="error">{{ adoptError }}</p>
+    </Modal>
 
     <ul v-if="pendingInvites.length" class="list invites">
       <li v-for="invite in pendingInvites" :key="invite.id" class="row invite-row">
@@ -244,6 +326,70 @@ function onLogout() {
 
 .chip:disabled {
   opacity: 0.6;
+}
+
+.chip-ghost {
+  padding: 0.35rem 0.7rem;
+  min-height: 40px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.chip-ghost.tone-blue {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.chip-ghost.tone-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.menu-wrap {
+  position: relative;
+}
+
+.menu-pop {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  right: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  min-width: 10rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.menu-item {
+  padding: 0.7rem 0.9rem;
+  min-height: 44px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.menu-item:hover {
+  background: var(--bg-elev-2);
+}
+
+.modal-body input,
+.modal-body .link-row input {
+  padding: 0.6rem;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.9rem;
 }
 
 .invite-row {

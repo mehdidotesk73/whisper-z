@@ -399,16 +399,21 @@ forge or read anything either way — worst case is losing an invite before it's
 be re-sent — so it's an acceptable place to leave client-checked, consistent with the already-
 documented "restricting invite-link minting to the owner" gap.
 
-**"Adopt an alias" is the mirror of "+ Add to account," from the other side.** The original migration
-flow requires opening the *guest's* personal link and clicking "+ Add to account" from there.
-`SessionView.vue`'s "Adopt an alias" (account-backed `sessionId` routes only) does the same
-`migrateGuestSessionToAccount` call, just triggered from the account's own view instead: paste the
-guest identity's *private* key directly (the same key its Warning button reveals), and the account
-recognizes it as itself without ever switching views. No new mechanism — same merge, same
-non-destructive semantics, just a second entry point into it. A separate "Logged in as `<username>`"
-control (also `sessionId`-only) shows the current session's adopted aliases, resolved via the exact
-same `sessionAliasKeys`/`nameFor` state already loaded to render the thread — no new fetch, per the
-same reasoning that ruled out a global, cross-session aliases view (see below).
+**"Adopt guest account" is the mirror of "+ Add to account," from the other side — and it's fully
+account-level, not tied to any open session.** The original migration flow requires opening the
+*guest's* personal link and clicking "+ Add to account" from there. `adoptGuestIdentity`
+(`src/api/sessionActions.ts`), reachable from `AccountHome.vue`'s **Account** menu, does the same
+`migrateGuestSessionToAccount` call, just triggered from the account's own home screen instead: paste
+the guest identity's *private* key directly (the same key its Warning button reveals). It doesn't
+need to already be viewing that session — a guest identity holds exactly one `session_access` row by
+construction (a fresh keypair per visit), so `adoptGuestIdentity` derives the guest's own lookup tag,
+opens that one row itself to learn which session and key it's for, and calls
+`migrateGuestSessionToAccount` with those. No new mechanism — same merge, same non-destructive
+semantics, just an entry point that works from anywhere. A separate "Logged in as `<username>`"
+control on `SessionView.vue` (account-backed `sessionId` routes only) shows *that particular
+session's* adopted aliases, resolved via `sessionAliasKeys`/`nameFor` state already loaded to render
+the thread — no new fetch, per the same reasoning that ruled out a global, cross-session aliases view
+(see below). Adopting is account-wide; seeing the effect is still naturally per-session.
 
 **Why there's no account-wide "list of my aliases" page.** A global view would need its own fetch —
 "give me every alias this account has ever adopted, across every session" — and that fetch would
@@ -478,20 +483,26 @@ Organized by feature. Keep them thin — mostly templating, logic lives in `lib/
 
 ```
 src/components/
+  Modal.vue           generic bottom-sheet/centered overlay (open, title, @close) — every panel that
+                      used to expand inline (Invite, invite-by-key, aliases, my key, adopt account)
+                      now renders inside one of these instead
   HelpModal.vue       renders docs/concepts/overview.md (imported via `?raw`) into the Help modal
   SessionHome.vue     logged-out home: "Start a session", paste-a-link box, "Create an account", and
                       "Log in" (accepts a full account link, any origin, or just the bare key)
-  AccountHome.vue     logged-in home: chat list sorted by latest activity (src/api/sessionList.ts),
-                      "My public key" (share for a session_invites-based invite), pending invites,
-                      + "Start a session"
+  AccountHome.vue     logged-in home: "Signed in as <username>" (top left), an **Account** menu
+                      (top right, next to a ghost "Log out") offering "My public key" and "Adopt
+                      guest account" — src/api/sessionActions.ts's adoptGuestIdentity, reachable from
+                      here regardless of which session a pasted guest identity belongs to — plus
+                      chat list sorted by latest activity (src/api/sessionList.ts) and pending
+                      invites, + "Start a session"
   CreateAccount.vue   generate an account keypair + username, reveal its one-time account link
   JoinSession.vue     redeem an invite link as the logged-in account, a guest, or by logging in
                       on the spot (pasting an account link) — all via sessionActions.ts
   SessionView.vue     the thread — accepts either a guest packedKey or an account's sessionId. A
                       guest route can migrate to an account in place ("+ Add to account"); an
-                      account route can adopt a guest identity from its own side ("Adopt an alias")
-                      and see this session's adopted aliases ("Logged in as <username>"). Any
-                      participant, on either route, can "Invite by key" (src/api/inviteActions.ts)
+                      account route shows "Signed in as <username>", tap for that session's adopted
+                      aliases. An **Invite** menu offers "By join link" and "By public key"
+                      (src/api/inviteActions.ts), each opening its panel in a modal
 ```
 
 ## §7 — Build, Deploy & Conventions

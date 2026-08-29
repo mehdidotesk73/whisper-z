@@ -76,10 +76,16 @@ Continuing the session-model rebuild, in order:
       (a link click, or accepting an invite) that already is that consent. Also added: a "Log in"
       option on the logged-out home (`extractAccountKey`, accepts a full link on any origin or a
       bare key — fixed a real regression this surfaced, where every key created before `deriveBits`
-      was added to `generateKeyPair` failed to import at all, see `docs/experience.md`); "Adopt an
-      alias" and a per-session "Logged in as `<username>`" aliases view on `SessionView.vue`'s
-      account-backed route, both scoped to the currently-open session on purpose — see "Why there's
-      no account-wide list of my aliases" in `docs/system-design.md` §3.
+      was added to `generateKeyPair` failed to import at all, see `docs/experience.md`); "Adopt guest
+      account" (`adoptGuestIdentity`, `src/api/sessionActions.ts`) on `AccountHome.vue`'s **Account**
+      menu — account-level, not tied to any open session, since a guest identity's own single
+      `session_access` row is enough to find which session it belongs to — plus a per-session
+      "Logged in as `<username>`" aliases view on `SessionView.vue`'s account-backed route, scoped to
+      the currently-open session on purpose — see "Why there's no account-wide list of my aliases" in
+      `docs/system-design.md` §3. UI pass after live testing: Invite/invite-by-key/aliases/my-key/
+      adopt-account all moved from inline-expanding panels into a shared `Modal.vue` overlay,
+      "Invite" collapsed into one menu button ("By join link"/"By public key"), and top-bar buttons
+      got a ghost (outline, no fill) variant for lower-emphasis actions like Home/Log out.
 - [ ] **Stage E** — rename/remove a session from your list, plus pin/favorite a session (deferred
       here from Stage D's list-sort work: sessions with a pin would sort above latest-activity
       order, not yet designed). Also carries a proposed auto-naming design (from live testing, after

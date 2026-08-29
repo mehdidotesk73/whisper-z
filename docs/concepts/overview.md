@@ -10,22 +10,22 @@ spot — nothing is typed in, nothing sent anywhere except what's needed to invi
 session opens immediately: you can start typing right away, even before anyone else has joined.
 
 From inside the session:
-- **Invite** reveals a link you can send to someone so they can join. It works once and expires
-  after 10 minutes — tap **New link, for another person** to invite someone else.
-- **Invite by key** adds someone directly if they already have an account and you have their public
-  key — get it from them in person, or however you already trust each other (their account's **My
-  public key** shows a copyable version). No link to send; they'll see it waiting for them next time
-  they open their account. Right after sending, you'll see **Undo** — that only works while you're
-  still on this screen; refresh or navigate away and there's nothing left to undo.
+- **Invite ▾** opens a small menu with the two ways to add someone, each in its own popup:
+  - **By join link** reveals a link you can send to someone so they can join. It works once and
+    expires after 10 minutes — tap **New link, for another person** to invite someone else.
+  - **By public key** adds someone directly if they already have an account and you have their
+    public key — get it from them in person, or however you already trust each other (their
+    account's **My public key** shows a copyable version). No link to send; they'll see it waiting
+    for them next time they open their account. Right after sending, you'll see **Undo** — that only
+    works while you're still on this screen; refresh or navigate away and there's nothing left to
+    undo.
 - **+ Add to account** (only shown if you joined as a guest) adds this session to an account's chat
   list — either your own, if you're signed in, or one you sign into on the spot by pasting its
   account link. Nothing about the session or its history changes; this just gives you a second way
   to reach it, so you don't have to keep guarding the personal link.
-- **Adopt an alias** (only shown when viewing from your account) does the same thing from the other
-  direction — paste a guest identity's private key (the one its own ⚠ Warning button reveals) to
-  recognize it as you in this session, without switching over to that guest link first.
-- **Logged in as `<username>`** (only shown when viewing from your account) shows which senders in
-  *this* session are secretly also you, once you've adopted any aliases into it.
+- **Signed in as `<username>`** (only shown when viewing from your account) — tap it to see which
+  senders in *this* session are secretly also you, once you've adopted any aliases (see **Adopt
+  guest account** below).
 - **⚠ Warning** reveals your **personal link** — save it (bookmark it, message it to yourself) so
   you can reopen this exact session later on this device. Closing the tab without saving it means
   losing access for good; there's no password and no recovery. Once a session has been added to an
@@ -53,11 +53,17 @@ automatically, and the personal-link Warning no longer applies to sessions opene
 since the account link already covers that. Your chat list is sorted by whichever session had a
 message most recently.
 
-**My public key**, shown on your account's home screen, is a copyable blob of your public key — safe
-to share openly with anyone. Give it to someone in person (or however you already trust them) so
-they can use **Invite by key** to add you to a session directly, no link required. If someone's sent
-you one, you'll see it as a pending invite on your account home the next time you open it — **Accept**
-joins the session immediately, **Reject** just discards it.
+Your account home shows **Signed in as `<username>`** on the top left, and an **Account ▾** menu on
+the top right (next to **Log out**) with two options:
+- **My public key** is a copyable blob of your public key — safe to share openly with anyone. Give
+  it to someone in person (or however you already trust them) so they can use **Invite ▾ → By public
+  key** to add you to a session directly, no link required.
+- **Adopt guest account** lets you paste a guest identity's private key (the one its own ⚠ Warning
+  button reveals) to recognize it as you, wherever it appears — you don't need to already be viewing
+  the session it belongs to; pasting the key is enough.
+
+If someone's sent you an invite by public key, you'll see it as a pending invite on your account home
+the next time you open it — **Accept** joins the session immediately, **Reject** just discards it.
 
 ## Chatting
 

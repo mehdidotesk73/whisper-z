@@ -184,14 +184,26 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   a real, always-available cancel (the row has no owner reference for a later visit to reconstruct).
   A persistent local list of sent invites was considered and explicitly rejected — undo-in-memory is
   the honest scope, matching what the design can actually support
-- **Added:** "Adopt an alias" (`SessionView.vue`, account-backed routes) — the mirror of "+ Add to
-  account" from the other side: paste a guest identity's private key directly, from the account's own
-  session view, instead of needing to open that guest's link first. Same `migrateGuestSessionToAccount`
-  call, just a second entry point. Paired with a per-session "Logged in as `<username>`" control
-  showing which senders in *that* session are adopted aliases — deliberately scoped to the
-  currently-open session rather than a global, cross-session list, after working through why a global
-  version would need its own new, distinguishable fetch (see `docs/system-design.md` §3's "Why
-  there's no account-wide list of my aliases")
+- **Added:** "Adopt guest account" (`adoptGuestIdentity`, `src/api/sessionActions.ts`) — the mirror
+  of "+ Add to account" from the other side: paste a guest identity's private key to recognize it as
+  you, wherever it appears. First built as a `SessionView.vue` per-session control, then generalized
+  to a fully account-level action on `AccountHome.vue`'s **Account** menu once it became clear it
+  didn't need to be session-scoped at all — a guest identity holds exactly one `session_access` row
+  by construction, so `adoptGuestIdentity` derives its lookup tag and opens that one row itself to
+  learn which session and key to merge, rather than requiring the caller to already be viewing it.
+  Same `migrateGuestSessionToAccount` call underneath either way. Paired with a per-session "Logged
+  in as `<username>`" control on `SessionView.vue` showing which senders in *that* session are
+  adopted aliases — deliberately scoped to the currently-open session rather than a global,
+  cross-session list, after working through why a global version would need its own new,
+  distinguishable fetch (see `docs/system-design.md` §3's "Why there's no account-wide list of my
+  aliases")
+- **UI pass, after live testing:** every panel that used to expand inline (Invite, invite-by-key,
+  session aliases, my public key, adopt guest account) now opens in `Modal.vue`, a small reusable
+  bottom-sheet/centered overlay. "Invite" collapsed from two separate top-bar buttons into one
+  "Invite ▾" menu offering "By join link"/"By public key". Top-bar buttons that aren't the main
+  action on a screen (Home, Log out, Account, Invite) got a ghost (outline, no fill) style instead of
+  the solid `.chip` used everywhere else, to visually de-emphasize navigation/menu triggers relative
+  to the actual content
 - **Documented, not fixed — a real, distinct gap surfaced through review:** this schema hides the
   membership graph from anyone with only database *content* access, but does nothing about
   network/IP-level traffic correlation — an operator or network observer can still see "this IP
@@ -199,8 +211,8 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   log) connects backwards to everything that IP/tag ever touched. VPN/Tor is the real mitigation,
   and it's the user's choice to make, not something this app provides
 - See "Session list sorted by latest activity," "Adding an existing account to a session by
-  public key," and "'Adopt an alias' is the mirror of '+ Add to account'" in `docs/system-design.md`
-  §3 for the full design
+  public key," and "'Adopt guest account' is the mirror of '+ Add to account'" in
+  `docs/system-design.md` §3 for the full design
 
 ### v0.6.0 — 2026-08-28 (Stage C: guest → account migration)
 - **Added:** `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) — adds an account's own

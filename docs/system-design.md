@@ -655,9 +655,18 @@ src/components/
 
 **Build before commit:** `npm run build` (catches TS errors + template parse errors)
 
+**Tests:** `npm test` (Vitest) — pure logic in `src/lib/` (crypto primitives, hash routing, guest
+naming) and the non-Supabase-dependent parts of `src/api/sessions.ts`, using a minimal mocked query
+builder to catch table/column-name regressions without needing a real backend. Nothing that calls
+Supabase for real is exercised — that still needs live device testing, same as before Vitest existed.
+Config lives in `vite.config.ts`'s `test` block (plain Node environment by default, since that
+matches how these functions were already being verified — standalone Node scripts using `webcrypto` —
+before they became permanent tests; a file needing `window` opts into jsdom via a
+`// @vitest-environment jsdom` docblock at its top, see `src/lib/route.test.ts`).
+
 **Production and preview, both via Netlify** (see `netlify.toml`): `main` pushes build production; every other branch/PR gets its own Deploy Preview.
 
-**PR build check:** `.github/workflows/ci.yml` runs `npm run build` on every PR — this is the `build` status check the branch ruleset requires. It doesn't deploy anything.
+**PR build check:** `.github/workflows/ci.yml` runs `npm run build` then `npm test` on every PR, both inside the one `build` status check the branch ruleset requires. It doesn't deploy anything.
 
 **Conventions:**
 - Components: PascalCase, one per file

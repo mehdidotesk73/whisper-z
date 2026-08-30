@@ -89,6 +89,14 @@ to match so the view doesn't jump. Whether to show the button is a real existenc
 (`hasMessagesBefore`) run after each load, not assumed — see "Message history loads a window at a
 time" in `docs/system-design.md` §3.
 
+**Test suite added (Vitest)** — `npm test` covers `src/lib/`'s pure logic (crypto primitives —
+seal/open round trips, pairwise-ECDH reciprocity, lookup-tag stability, the `key_ops` and
+JWK-field-order regressions from Stage D/earlier — plus hash routing and guest naming) and
+`src/api/sessions.ts`'s non-Supabase logic (`isJoinAccessExpired`) and mocked query shape
+(`fetchMessagesInRange`/`hasMessagesBefore`, catching a wrong table/column name without a real
+backend). Wired into `.github/workflows/ci.yml` inside the existing `build` check. Nothing that calls
+Supabase for real is covered — that still needs live device testing. See `docs/system-design.md` §7.
+
 ## Next (Current Sprint)
 
 Continuing the session-model rebuild, in order:

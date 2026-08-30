@@ -72,7 +72,11 @@ whatever they're actually asking about.
   branch ruleset requires it to pass before merge. That's a backstop, not a substitute: run
   `npm run build` locally before pushing rather than letting CI find it — a red check on the user's
   PR is noise they have to interpret.
-- There is **no test suite** yet. A passing build is the bar.
+- **Tests:** `npm test` (Vitest, `vitest run`) covers `src/lib/`'s pure logic (crypto primitives, hash
+  routing, guest naming) and `src/api/sessions.ts`'s non-Supabase-dependent logic and mocked query
+  shape. **Run it alongside `npm run build` before every commit that touches tested code** — CI runs
+  both in the same `build` check. Nothing that calls Supabase for real is tested end-to-end (see "No
+  third-party APIs" below); those still need the user's live device testing.
 - **No third-party APIs.** The app has no external data dependencies today. It will need a shared
   database (Supabase, via the `add-database` skill) once messages have to sync between the two
   participants' devices — until that's wired up, storage and sync **cannot be reproduced in this
@@ -101,6 +105,7 @@ src/
   env.d.ts                 ambient types: vite/client, PWA virtual module, __BUILD_ID__/__BUILD_TIME__
   api/                     Supabase client + data access, once the shared database is wired up
   lib/                     pure computation — key derivation, encrypt/decrypt, session helpers
+                           (*.test.ts co-located per file — Vitest, see Build & verify)
   components/
     HelpModal.vue          renders docs/concepts/*.md into the Help modal
     <feature components>   one component per screen — Start chat, Join chat, Chat view
@@ -117,7 +122,7 @@ docs/
   concepts/*.md            per-page user docs (rendered into the Help modal)
 public/
   favicon.svg, logo-192.png, logo-512.png   placeholder icons — replace with real branding
-.github/workflows/ci.yml       build check on every PR (required by the branch ruleset)
+.github/workflows/ci.yml       build + test check on every PR (required by the branch ruleset)
 netlify.toml                   preview-deploy config (Netlify)
 package-lock.json              committed — CI runs `npm ci` and needs it
 ```

@@ -121,6 +121,27 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.9.0 — 2026-08-30 (Vitest test suite)
+- **Added:** `npm test` (Vitest) covering `src/lib/`'s pure logic and the non-Supabase-dependent
+  parts of `src/api/sessions.ts`. Every assertion mirrors a claim this session had previously only
+  verified with a throwaway `node script.mjs` and discarded — DH reciprocity, seal/open round trips,
+  lookup-tag stability per identity/purpose, an uninvolved third party's inability to reproduce a
+  pairwise tag or decrypt, the `key_ops`-stripping fix, and the JWK-field-order fix behind
+  `canonicalPublicKeyId`. Turning those into permanent tests means a future change that reintroduces
+  any of them fails CI immediately, instead of waiting for a live bug report
+- **Mocked, not real, coverage for `src/api/`:** a minimal hand-rolled chainable/thenable stand-in for
+  supabase-js's query builder, just enough to cover the exact chain shapes `sessions.ts` uses. This
+  catches "wrong table or column name" regressions (exactly what a rename like `owner_pub` →
+  `owner_tag` or `messages` → `session_log` risks) without needing real Supabase access, which this
+  sandbox has never had. It proves nothing about RLS behavior or real schema state — that's still
+  only verified by the user's live device testing, unchanged
+- **Environment split:** plain Node by default (fast, matches how these functions were always run
+  during manual verification) with jsdom opted into per-file (`// @vitest-environment jsdom`) only
+  where needed — `route.ts` reads `window.location` and registers a `hashchange` listener at module
+  load time, so importing it at all requires a `window` to exist
+- Wired into `.github/workflows/ci.yml` as an additional step inside the existing `build` job/check,
+  rather than a second required check to configure
+
 ### v0.8.0 — 2026-08-29 (message history pagination)
 - **Added:** `SessionView.vue` used to fetch every `messages` row for a session on open, decrypting
   and rendering the entire history no matter its age — fine for a young session, a cost that only

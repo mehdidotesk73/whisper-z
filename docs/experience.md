@@ -141,6 +141,12 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   load time, so importing it at all requires a `window` to exist
 - Wired into `.github/workflows/ci.yml` as an additional step inside the existing `build` job/check,
   rather than a second required check to configure
+- **Found immediately by CI itself:** `ci.yml` was still pinned to Node 20, and jsdom 30 requires
+  Node ≥22 — `route.test.ts` (the one file needing jsdom) crashed on CI with `webidl.util.markAsUncloneable
+  is not a function`, a jsdom/undici internal that doesn't exist on Node 20, while the other 26
+  Node-only tests passed fine. Fixed by bumping `ci.yml` to Node 22 and adding an `engines.node`
+  field to `package.json` so the requirement is explicit rather than only discoverable by a red CI
+  run. A good first real demonstration of the CI wiring actually catching something
 
 ### v0.8.0 — 2026-08-29 (message history pagination)
 - **Added:** `SessionView.vue` used to fetch every `messages` row for a session on open, decrypting

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "description": "A Vue 3 + Vite PWA scaffold for building with Claude Code",
+  "engines": {
+    "node": ">=22.22.2"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",

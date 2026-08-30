@@ -483,6 +483,104 @@ considered and rejected: it trades one indexed existence check for an occasional
 start of a session's history, but a real check is cheap enough here that there's no reason to accept
 the imprecision.
 
+**Stage E: the admin/capability layer (design finalized, not yet built).** Worked out over several
+rounds of design review, including two rejected alternatives verified with standalone scripts before
+being ruled out (see "Two rejected designs" below) — recorded here in full before any of it is coded.
+
+*Two keypairs per session, both freshly generated at creation, neither derived from anything:*
+- `adminEcdhKeyPair` — its private half is what capabilities are derived from.
+- `adminSigningKeyPair` (ECDSA) — signs grant and rename records so any member can verify them.
+
+Both public halves ride in `SessionAccessPayload`/`JoinPayload` for everyone, for free. Both private
+halves go only into the creator's own `session_access` row. Neither is derived from, or related to,
+the creator's own persistent identity key — deliberately. This isn't about hiding who's admin (fellow
+participants already learn everyone's real identity within a session they share, same as they always
+have via `session_participants`); it's blast radius. A session's admin authority has to be a property
+of *that session*, not of the person, so that compromising one session's admin material can never
+threaten the creator's real account, and so a capability can be granted/revoked in principle without
+touching anyone's actual identity.
+
+*A capability is `SHA-256(adminEcdhPrivateKey || purpose)`* — one-way, the same primitive
+`deriveLookupTag` already uses. Admin derives any capability on demand, never stores one. A chain
+(`K2 = H(K1 || purpose2)`) stays equally non-invertible at every link — see "Two rejected designs"
+for why a chain can't *also* be verifiable by third parties without a signature doing that job
+separately.
+
+*Every identity also gets a personal ECDSA signing keypair, alongside its existing ECDH one* —
+generated at the same moment an identity is created (account creation, guest join), the same
+"two keys minted together" pattern as admin's. This is what makes a message's `sender` field
+verifiable instead of merely claimed: today, any participant holding the shared session key could
+write a message claiming to be anyone else in the session, since `sender` is just a self-reported
+field with nothing binding it to the identity it names. Signing closes that. It adds no new exposure
+— fellow participants already learn each other's real public keys via `session_participants`
+regardless, so a signature over an already-visible field reveals nothing new to that same audience,
+it just makes the claim checkable rather than trusted. Consequence: `session_participants`'s payload
+grows from a bare public-key-id string to `{publicKeyId, signingPublicKeyJwk}`, so participants can
+actually verify each other's signatures.
+
+*`messages` is renamed to `session_log`, and every entry is signed by whoever actually wrote it and
+carries a `kind`* (`'message' | 'rename' | 'capability-grant'`, extensible) *inside the decrypted
+payload* — no plaintext `kind` column, since nothing needs pre-decryption gating (a forged entry is
+already inert once the signature check fails). `kind` decides rendering: messages render as bubbles;
+`rename` and `capability-grant` render as centered system-style tags, the same convention chat apps
+generally use for "X changed the topic to Y."
+
+*A capability grant is two layers, not one, because it has two different audiences.* Everyone in the
+session should see that a grant happened (an ordinary `session_log` entry, signed, session-key
+encrypted like anything else) — but only the grantee should be able to use it. So the outer entry
+(`{kind: 'capability-grant', granteePublicKeyId, capability, timestamp, signature, sealedSecret}`) is
+visible to and verifiable by every participant, while `sealedSecret` is a *second*, independent ECIES
+seal to the grantee's real identity key — only they can open it and recover the actual usable
+capability key. The signature is over the whole record including `sealedSecret`'s ciphertext, so
+swapping in a different sealed payload next to a genuine signature is caught, same reasoning as the
+original content-hash-binding fix. The recipient discovers their grant simply by reading the thread
+they're already loading — no separate discovery table or scan needed, unlike `session_invites` (see
+below for why invites can't work this way). They verify the signature, then self-write the recovered
+capability key into their own `session_access` row (`updateSessionAccess`, same self-write-only
+pattern Stage C's migration already relies on).
+
+This is a real improvement over an earlier version of this design that used a dedicated
+`capability_grants` table mirroring `session_invites`: that table would have had its own visible row
+count — "N grants happened system-wide," the same class of leak `session_invites`' count already is.
+Folding grants into `session_log` removes that signal entirely: a grant is now indistinguishable from
+an ordinary message at the database level. Fewer tables, and strictly less exposed, not more.
+
+*A rename is the simpler, single-layer case* — pure broadcast, no nested seal, since everyone should
+see it and no one secret is being delivered: `{kind: 'rename', title, signature}`. The current title
+is never stored anywhere; it's resolved live from the latest rename entry in the log a participant is
+already loading to read the thread, exactly like a sender's display name is already resolved live
+rather than stored — no new fetch, no new traffic pattern. `SessionAccessPayload.title` (inert today
+— declared and read defensively, but nothing ever writes it) gets removed once this lands, since it
+was the wrong home for this from the start.
+
+*Invites stay structurally separate, and can't be folded into `session_log`* — an invite's entire job
+is to deliver the session key to someone who doesn't have it yet, so it's structurally impossible for
+an invite to live inside something encrypted *by* that same key. `session_invites`/`join_access`
+remain their own app-level mechanism, unaffected. They do gain the same authenticity treatment,
+though: an invite gets signed by whoever is actually using the invite capability to send it — admin's
+own dedicated signing key for admin-sent invites, or a granted (non-admin) member's own personal
+signing key (now that every identity has one) for theirs — and the receiver verifies that signature
+before joining, same "prove genuine authority, don't just trust the payload" principle as everything
+else here.
+
+*A guarded action (invite, first) needs the capability's private key as an actual argument* — derived
+on the fly if admin, read from your own row if granted — so a member with neither has no key material
+to pass in at all, not a hidden button.
+
+**Two rejected designs, both verified with standalone scripts before being ruled out:**
+1. **Deriving a capability via EC scalar addition** (`k_invite = k_admin + H(purpose)`) instead of a
+   hash. This would let anyone verify the capability's public key against the admin's public key
+   alone — but the same linearity that enables that means anyone holding the derived *private* key
+   trivially recovers the admin's real private key by subtracting the same public offset. This is the
+   exact class of weakness BIP32 hardened derivation exists to avoid; confirmed with a script (modular
+   arithmetic over a cyclic group) before rejecting it.
+2. **Expecting a one-way hash derivation to be independently verifiable at all**, chained or not.
+   Mathematically impossible by the definition of one-wayness — if a public function could verify a
+   hash-derived key against a public key alone, the hash would have exploitable algebraic structure
+   and wouldn't be one-way in the first place. Verifiability is the signature layer's job instead of
+   the derivation's; confirmed with a script (ECDSA sign/verify round-trip, tamper and impostor cases
+   both correctly rejected) that the signature approach works cleanly alongside a separate ECDH keypair.
+
 ## §4 — Shared Logic (lib/)
 
 Pure functions over already-fetched data. These recompute instantly, no refetch. Example:

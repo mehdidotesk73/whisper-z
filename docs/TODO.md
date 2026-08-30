@@ -93,39 +93,17 @@ time" in `docs/system-design.md` §3.
 
 Continuing the session-model rebuild, in order:
 
-- [ ] **Stage E** — admin/capability layer (design finalized in `docs/system-design.md` §3, moved up
-      ahead of session rename/pin since rename's permission gating depends on it). At session
-      creation: a fresh, random `adminEcdhKeyPair` (capability derivation) and `adminSigningKeyPair`
-      (ECDSA, for verifiable grant records) — both public halves ride in `SessionAccessPayload`/
-      `JoinPayload` for everyone, both private halves go only into the creator's own `session_access`
-      row. A capability is `SHA-256(adminEcdhPrivateKey || purpose)` — one-way, same primitive as
-      `deriveLookupTag` — so admin derives any capability on demand with no storage, and a chain
-      (`K2 = H(K1 || purpose2)`) stays equally non-invertible at every link. Granting a capability to
-      a member: seal the derived key to their real identity public key via the same pairwise-ECDH
-      delivery `session_invites` already uses, plus a signed statement
-      (`sign(adminSigningKey, {sessionId, granteePublicKeyId, capability, timestamp,
-      envelopeCiphertextHash})`) written unsealed alongside it in the session log, so any member can
-      verify a grant is genuinely admin-authorized without decrypting anything — the content hash
-      binds the signature to that specific envelope, closing a swap/tamper gap found while designing
-      this. The recipient discovers their grant the same way `checkForInvites` works today, verifies
-      the signature, then self-writes the capability key into their own `session_access` row
-      (`updateSessionAccess`, same self-write-only pattern Stage C's migration already relies on). A
-      guarded action (invite, first) needs the capability's private key as an actual argument —
-      derived on the fly if admin, read from your own row if granted — so a member with neither has
-      no key material to pass in, not a hidden button. Rename (deferred to Stage F) will use this same
-      layer once it lands, but doesn't write into anyone else's `session_access` row — see "Session
-      title is a session_log broadcast, not per-participant state" below. Also rides along in this
-      migration: `session_access.owner_pub` → `owner_tag`, since it's not a public key at all (it's a
-      derived lookup tag) and this work already touches that exact pattern extensively.
-      **Two rejected designs, both verified with standalone scripts before being ruled out:** (1)
-      deriving a capability via EC scalar addition (`k_invite = k_admin + H(purpose)`) instead of a
-      hash — this WOULD let anyone verify the capability's public key against the admin's public key
-      alone, but the same linearity that enables that means anyone holding the derived private key
-      trivially recovers the admin's real private key by subtracting the same public offset (the
-      exact class of weakness BIP32 hardened derivation exists to avoid) — confirmed with a script
-      before rejecting it. (2) a genuinely one-way hash derivation being independently *verifiable*
-      against a public key at all, chained or not — mathematically impossible by definition of
-      one-wayness, not a gap to engineer around; verifiability is the signature layer's job instead.
+- [ ] **Stage E** — admin/capability layer (full design in `docs/system-design.md` §3's "Stage E: the
+      admin/capability layer" entry, moved up ahead of session rename/pin since rename's permission
+      gating depends on it). In short: a fresh per-session admin keypair (ECDH, for deriving
+      capabilities) plus a separate admin signing keypair (ECDSA, for verifiable grant/rename
+      records); capabilities are one-way hash derivations, never minted/stored; every identity gains
+      its own personal signing keypair too, closing a real pre-existing gap where any participant
+      could forge another's `sender` field; `messages` becomes `session_log`, type-tagged and signed
+      per entry, with capability grants using a two-layer seal (broadcast-visible fact, recipient-only
+      secret) and renames a single-layer broadcast; `session_access.owner_pub` → `owner_tag` rides
+      along. Two alternative designs were seriously explored and rejected, each verified with a
+      standalone script first — see the design entry for both and why.
 - [ ] **Stage F** — rename/remove a session from your list, plus pin/favorite a session (deferred
       here from Stage D's list-sort work: sessions with a pin would sort above latest-activity
       order, not yet designed). Also carries a proposed auto-naming design (from live testing, after

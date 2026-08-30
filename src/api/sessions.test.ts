@@ -5,8 +5,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // (.select/.eq/.gte/.lt/.limit/.order, awaited at any point in the chain).
 // This is deliberately not a full mock of the client: the goal is catching
 // "this function queries the wrong table/column" regressions (exactly the
-// class of mistake a rename like owner_pub -> owner_tag or
-// messages -> session_log could introduce), not re-testing supabase-js itself.
+// class of mistake the owner_pub -> owner_tag and messages -> session_log
+// renames risked), not re-testing supabase-js itself.
 function makeQueryBuilder(result: { data: unknown; error: unknown }) {
   const builder = {
     select: vi.fn(() => builder),
@@ -33,14 +33,14 @@ beforeEach(() => {
 })
 
 describe('fetchMessagesInRange', () => {
-  it('queries the messages table (update this string when the session_log rename lands)', async () => {
+  it('queries session_log', async () => {
     const { fetchMessagesInRange } = await import('./sessions')
     const rows = [{ id: '1', session_id: 's', ciphertext: 'c', iv: 'i', created_at: 'now' }]
     fromMock.mockReturnValue(makeQueryBuilder({ data: rows, error: null }))
 
     const result = await fetchMessagesInRange('s', '2026-01-01T00:00:00.000Z', null)
 
-    expect(fromMock).toHaveBeenCalledWith('messages')
+    expect(fromMock).toHaveBeenCalledWith('session_log')
     expect(result).toEqual(rows)
   })
 
@@ -59,7 +59,7 @@ describe('hasMessagesBefore', () => {
     fromMock.mockReturnValue(makeQueryBuilder({ data: [{ id: '1' }], error: null }))
 
     expect(await hasMessagesBefore('s', '2026-01-01T00:00:00.000Z')).toBe(true)
-    expect(fromMock).toHaveBeenCalledWith('messages')
+    expect(fromMock).toHaveBeenCalledWith('session_log')
   })
 
   it('is false when nothing comes back', async () => {

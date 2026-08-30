@@ -47,8 +47,8 @@ async function findAccessRow(
   account: CurrentAccount,
   sessionId: string,
 ): Promise<{ row: SessionAccessRow; payload: SessionAccessPayload } | null> {
-  const ownerPub = await deriveLookupTag(account.privateKey, 'session-access')
-  const rows = await fetchSessionAccessForOwner(ownerPub)
+  const ownerTag = await deriveLookupTag(account.privateKey, 'session-access')
+  const rows = await fetchSessionAccessForOwner(ownerTag)
   for (const row of rows) {
     try {
       const payload = await openSealed<SessionAccessPayload>(toEnvelope(row), account.privateKey)
@@ -130,9 +130,9 @@ export async function startNewSession(account: CurrentAccount | null, title?: st
 
   const payload: SessionAccessPayload = { sessionId, sessionKey: sessionKeyJwk, role: 'owner', title }
   const sealed = await sealForRecipient(payload, identity.publicKey)
-  const ownerPub = await deriveLookupTag(identity.privateKey, 'session-access')
+  const ownerTag = await deriveLookupTag(identity.privateKey, 'session-access')
 
-  const ok = await insertSessionAccess(ownerPub, sealed)
+  const ok = await insertSessionAccess(ownerTag, sealed)
   if (!ok) return null
 
   const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
@@ -159,9 +159,9 @@ export async function joinExistingSession(
     role: 'member',
   }
   const sealed = await sealForRecipient(payload, identity.publicKey)
-  const ownerPub = await deriveLookupTag(identity.privateKey, 'session-access')
+  const ownerTag = await deriveLookupTag(identity.privateKey, 'session-access')
 
-  const ok = await insertSessionAccess(ownerPub, sealed)
+  const ok = await insertSessionAccess(ownerTag, sealed)
   if (!ok) return null
 
   const sessionKey = await importSessionKey(joinPayload.sessionKey)
@@ -220,8 +220,8 @@ export async function migrateGuestSessionToAccount(
       identityPublicKeyIds: [guestPublicKeyId],
     }
     const sealed = await sealForRecipient(payload, account.publicKey)
-    const ownerPub = await deriveLookupTag(account.privateKey, 'session-access')
-    const ok = await insertSessionAccess(ownerPub, sealed)
+    const ownerTag = await deriveLookupTag(account.privateKey, 'session-access')
+    const ok = await insertSessionAccess(ownerTag, sealed)
     if (!ok) return false
   }
 
@@ -248,8 +248,8 @@ export async function adoptGuestIdentity(pasted: string, account: CurrentAccount
   const guestPrivateKey = await importPrivateKey(privateKeyJwk)
   const guestPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
 
-  const ownerPub = await deriveLookupTag(guestPrivateKey, 'session-access')
-  const rows = await fetchSessionAccessForOwner(ownerPub)
+  const ownerTag = await deriveLookupTag(guestPrivateKey, 'session-access')
+  const rows = await fetchSessionAccessForOwner(ownerTag)
   if (!rows.length) return false
 
   const payload = await openSealed<SessionAccessPayload>(toEnvelope(rows[0]), guestPrivateKey)

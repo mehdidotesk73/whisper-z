@@ -18,11 +18,14 @@ export async function createSession(): Promise<string | null> {
 // --- session_access: "who can find this session, and with what key" -------
 // Looked up by a derived lookup tag (see lib/crypto.ts deriveLookupTag), not
 // by a real public key — that's the whole point: the database can see that
-// a tag has N rows, never which sessions they point to.
+// a tag has N rows, never which sessions they point to. `owner_tag` used to
+// be named `owner_pub`, which was actively misleading — it's a one-way
+// derived tag (SHA-256 of a private scalar plus a purpose string), not a
+// public key, and calling it one implied a property it doesn't have.
 
 export interface SessionAccessRow {
   id: string
-  owner_pub: string
+  owner_tag: string
   ciphertext: string
   iv: string
   ephemeral_public_key: string
@@ -33,9 +36,9 @@ export function toEnvelope(row: { ciphertext: string; iv: string; ephemeral_publ
   return { ciphertext: row.ciphertext, iv: row.iv, ephemeralPublicKey: row.ephemeral_public_key }
 }
 
-export async function insertSessionAccess(ownerPub: string, envelope: SealedEnvelope): Promise<boolean> {
+export async function insertSessionAccess(ownerTag: string, envelope: SealedEnvelope): Promise<boolean> {
   const { error } = await supabase.from('session_access').insert({
-    owner_pub: ownerPub,
+    owner_tag: ownerTag,
     ciphertext: envelope.ciphertext,
     iv: envelope.iv,
     ephemeral_public_key: envelope.ephemeralPublicKey,
@@ -67,8 +70,8 @@ export async function updateSessionAccess(id: string, envelope: SealedEnvelope):
   return true
 }
 
-export async function fetchSessionAccessForOwner(ownerPub: string): Promise<SessionAccessRow[]> {
-  const { data, error } = await supabase.from('session_access').select('*').eq('owner_pub', ownerPub)
+export async function fetchSessionAccessForOwner(ownerTag: string): Promise<SessionAccessRow[]> {
+  const { data, error } = await supabase.from('session_access').select('*').eq('owner_tag', ownerTag)
 
   if (error) {
     logDebug(`fetchSessionAccessForOwner failed: ${error.message}`, 'error')
@@ -79,14 +82,14 @@ export async function fetchSessionAccessForOwner(ownerPub: string): Promise<Sess
 
 /** Fires when a new access row is added for this owner tag (e.g. an invite arriving). */
 export function subscribeSessionAccess(
-  ownerPub: string,
+  ownerTag: string,
   onInsert: (row: SessionAccessRow) => void,
 ): RealtimeChannel {
   return supabase
-    .channel(`session-access-${ownerPub}`)
+    .channel(`session-access-${ownerTag}`)
     .on(
       'postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'session_access', filter: `owner_pub=eq.${ownerPub}` },
+      { event: 'INSERT', schema: 'public', table: 'session_access', filter: `owner_tag=eq.${ownerTag}` },
       (payload) => onInsert(payload.new as SessionAccessRow),
     )
     .subscribe()
@@ -166,9 +169,9 @@ export async function claimJoinAccess(joinId: string): Promise<JoinAccessRow | n
 // --- session_participants: "who's in this session", encrypted with the --
 // session's own shared key. `session_id` stays a plaintext lookup column —
 // "this session has N participant rows" is the same accepted metadata leak
-// as `messages.session_id` already being plaintext — but each row's public
+// as `session_log.session_id` already being plaintext — but each row's public
 // key is sealed inside `ciphertext`, symmetrically, with the exact same
-// session key `messages` are encrypted with (see encryptText/decryptText in
+// session key `session_log` entries are encrypted with (see encryptText/decryptText in
 // lib/crypto.ts — no ECDH, no ephemeral key needed: anyone who legitimately
 // holds the session key is already a real participant). Without that key, a
 // full database dump shows sessions exist and roughly how many people are
@@ -222,8 +225,11 @@ export function subscribeParticipants(
     .subscribe()
 }
 
-// --- messages: encrypted with the session's shared key, sender embedded ---
+// --- session_log: encrypted with the session's shared key, sender embedded -
 // inside the plaintext rather than a column — see docs/system-design.md §3.
+// Named `session_log` rather than `messages` since it's meant to eventually
+// carry more than chat messages (renames, capability grants — see Stage E in
+// system-design.md §3); everything below is still message-only for now.
 
 export interface MessageRow {
   id: string
@@ -251,7 +257,7 @@ export async function fetchMessagesInRange(
   sinceISO: string,
   beforeISO: string | null,
 ): Promise<MessageRow[]> {
-  let query = supabase.from('messages').select('*').eq('session_id', sessionId).gte('created_at', sinceISO)
+  let query = supabase.from('session_log').select('*').eq('session_id', sessionId).gte('created_at', sinceISO)
   if (beforeISO) query = query.lt('created_at', beforeISO)
   const { data, error } = await query.order('created_at', { ascending: true })
 
@@ -265,7 +271,7 @@ export async function fetchMessagesInRange(
 /** Existence check backing the "Load more" button — cheap since it's a single indexed row, not a count. */
 export async function hasMessagesBefore(sessionId: string, beforeISO: string): Promise<boolean> {
   const { data, error } = await supabase
-    .from('messages')
+    .from('session_log')
     .select('id')
     .eq('session_id', sessionId)
     .lt('created_at', beforeISO)
@@ -279,7 +285,7 @@ export async function hasMessagesBefore(sessionId: string, beforeISO: string): P
 }
 
 export async function sendMessage(sessionId: string, ciphertext: string, iv: string): Promise<boolean> {
-  const { error } = await supabase.from('messages').insert({ session_id: sessionId, ciphertext, iv })
+  const { error } = await supabase.from('session_log').insert({ session_id: sessionId, ciphertext, iv })
 
   if (error) {
     logDebug(`sendMessage failed: ${error.message}`, 'error')
@@ -290,10 +296,10 @@ export async function sendMessage(sessionId: string, ciphertext: string, iv: str
 
 export function subscribeMessages(sessionId: string, onInsert: (row: MessageRow) => void): RealtimeChannel {
   return supabase
-    .channel(`messages-${sessionId}`)
+    .channel(`session-log-${sessionId}`)
     .on(
       'postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'messages', filter: `session_id=eq.${sessionId}` },
+      { event: 'INSERT', schema: 'public', table: 'session_log', filter: `session_id=eq.${sessionId}` },
       (payload) => onInsert(payload.new as MessageRow),
     )
     .subscribe()
@@ -313,7 +319,7 @@ export function unsubscribe(channel: RealtimeChannel) {
 export async function fetchLatestMessageTimes(sessionIds: string[]): Promise<Map<string, string>> {
   if (!sessionIds.length) return new Map()
   const { data, error } = await supabase
-    .from('messages')
+    .from('session_log')
     .select('session_id, created_at')
     .in('session_id', sessionIds)
     .order('created_at', { ascending: false })

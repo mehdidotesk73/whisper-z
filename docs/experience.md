@@ -121,6 +121,19 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.9.0 — 2026-08-30 (Stage E, part 1: schema renames)
+- **Renamed:** `session_access.owner_pub` → `owner_tag` (it's a one-way derived lookup tag, never a
+  real public key — the old name actively implied a property it doesn't have) and `messages` →
+  `session_log` (Stage E will add non-message entry kinds — renames, capability grants — to this
+  table; still message-only for now). Pure rename, no behavior change, no new columns
+- **Requires a Supabase migration run in lockstep with the merge** — Preview and Production share one
+  database, so running the SQL early (while this PR is still just in review) would break the live
+  production app immediately, since unrelated code on `main` still expects the old names. Run the
+  migration right when merging, not before
+- First piece of Stage E's admin/capability layer (see `docs/system-design.md` §3) — the rest
+  (per-session admin keys, per-identity signing keys, capability derivation, guarded invite) follow
+  in their own PRs
+
 ### v0.8.0 — 2026-08-29 (message history pagination)
 - **Added:** `SessionView.vue` used to fetch every `messages` row for a session on open, decrypting
   and rendering the entire history no matter its age — fine for a young session, a cost that only

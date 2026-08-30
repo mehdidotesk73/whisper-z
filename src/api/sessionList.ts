@@ -17,8 +17,8 @@ export interface SessionListItem {
 }
 
 export async function fetchSessionList(account: CurrentAccount): Promise<SessionListItem[]> {
-  const ownerPub = await deriveLookupTag(account.privateKey, 'session-access')
-  const rows = await fetchSessionAccessForOwner(ownerPub)
+  const ownerTag = await deriveLookupTag(account.privateKey, 'session-access')
+  const rows = await fetchSessionAccessForOwner(ownerTag)
 
   const items: SessionListItem[] = []
   for (const row of rows) {

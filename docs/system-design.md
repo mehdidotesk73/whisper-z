@@ -506,17 +506,33 @@ touching anyone's actual identity.
 for why a chain can't *also* be verifiable by third parties without a signature doing that job
 separately.
 
-*Every identity also gets a personal ECDSA signing keypair, alongside its existing ECDH one* —
-generated at the same moment an identity is created (account creation, guest join), the same
-"two keys minted together" pattern as admin's. This is what makes a message's `sender` field
-verifiable instead of merely claimed: today, any participant holding the shared session key could
-write a message claiming to be anyone else in the session, since `sender` is just a self-reported
-field with nothing binding it to the identity it names. Signing closes that. It adds no new exposure
-— fellow participants already learn each other's real public keys via `session_participants`
-regardless, so a signature over an already-visible field reveals nothing new to that same audience,
-it just makes the claim checkable rather than trusted. Consequence: `session_participants`'s payload
-grows from a bare public-key-id string to `{publicKeyId, signingPublicKeyJwk}`, so participants can
-actually verify each other's signatures.
+*Every identity also gets a personal ECDSA signing keypair* — derived from its existing ECDH private
+key via the same one-way hash primitive as everything else (`SHA-256(ecdhPrivateKeyBytes ||
+"personal-signing")`, reduced mod the curve order, used as the signing private scalar), not generated
+independently. This is what makes a message's `sender` field verifiable instead of merely claimed:
+today, any participant holding the shared session key could write a message claiming to be anyone
+else in the session, since `sender` is just a self-reported field with nothing binding it to the
+identity it names. Signing closes that. It adds no new exposure — fellow participants already learn
+each other's real public keys via `session_participants` regardless, so a signature over an
+already-visible field reveals nothing new to that same audience, it just makes the claim checkable
+rather than trusted. Consequence: `session_participants`'s payload grows from a bare public-key-id
+string to `{publicKeyId, signingPublicKeyJwk}`, so participants can actually verify each other's
+signatures.
+
+Deriving rather than generating independently matters for a concrete reason: a personal/account/guest
+link only ever carries one private key today, and generating the signing keypair separately would
+mean a link needs to carry two just to be that identity somewhere new — one to read/derive with, a
+second to sign with. Deriving it means the link shape never changes; the signing key is always
+recomputable on demand from the one secret that link already is. This is safe for reasons different
+from why admin's signing key stays independent (see "Two keypairs per session" above): there's no
+public-verifiability need here to create the earlier tension, since a signing public key is always
+explicitly published via `session_participants` rather than expected to be independently re-derived
+by a verifier — and the derived public key is exactly as cross-session-correlatable as the ECDH public
+key it's derived from already is, not an additional correlatable value, since the two are always seen
+together. Admin's key stays independent because that separation is about a *session-scoped*
+credential never touching a *persistent* identity; deriving a personal signing key from a personal
+identity key is the same identity expressing a second facet of itself, not one thing borrowing
+another's.
 
 *`messages` is renamed to `session_log`, and every entry is signed by whoever actually wrote it and
 carries a `kind`* (`'message' | 'rename' | 'capability-grant'`, extensible) *inside the decrypted

@@ -93,7 +93,18 @@ time" in `docs/system-design.md` §3.
 
 Continuing the session-model rebuild, in order:
 
-- [ ] **Stage E** — rename/remove a session from your list, plus pin/favorite a session (deferred
+- [ ] **Stage E** — admin/capability layer (full design in `docs/system-design.md` §3's "Stage E: the
+      admin/capability layer" entry, moved up ahead of session rename/pin since rename's permission
+      gating depends on it). In short: a fresh per-session admin keypair (ECDH, for deriving
+      capabilities) plus a separate admin signing keypair (ECDSA, for verifiable grant/rename
+      records); capabilities are one-way hash derivations, never minted/stored; every identity gains
+      its own personal signing keypair too, closing a real pre-existing gap where any participant
+      could forge another's `sender` field; `messages` becomes `session_log`, type-tagged and signed
+      per entry, with capability grants using a two-layer seal (broadcast-visible fact, recipient-only
+      secret) and renames a single-layer broadcast; `session_access.owner_pub` → `owner_tag` rides
+      along. Two alternative designs were seriously explored and rejected, each verified with a
+      standalone script first — see the design entry for both and why.
+- [ ] **Stage F** — rename/remove a session from your list, plus pin/favorite a session (deferred
       here from Stage D's list-sort work: sessions with a pin would sort above latest-activity
       order, not yet designed). Also carries a proposed auto-naming design (from live testing, after
       seeing a guest's deterministic name show up in an account's chat list — correct, but a little
@@ -104,7 +115,15 @@ Continuing the session-model rebuild, in order:
       and it stops auto-updating — a title only a real edit ever produces again. Needs a concrete
       design before starting: probably a plain `titleIsAuto: boolean` alongside `title` rather than
       literally hiding a marker inside the rendered string (fragile — collides with a user's own
-      chosen title that happens to match the auto format, ambiguous on rename-to-empty)
+      chosen title that happens to match the auto format, ambiguous on rename-to-empty). **Session
+      title is a session_log broadcast, not per-participant state:** nobody can find or write into
+      another participant's `session_access` row (its lookup tag is derived from that identity's own
+      private key), so a rename can't update `title` on everyone's row directly. It has to be a
+      `session_log` entry, encrypted with the shared session key like any other entry, with the
+      current title resolved live by scanning for the latest rename entry — exactly like a sender's
+      display name is already resolved live rather than stored. `SessionAccessPayload.title` (inert
+      today — declared and read defensively, but nothing ever writes it) should be removed once this
+      lands rather than wired up, since it was the wrong home for this.
 
 One-time setup — tick these off as they're done:
 
@@ -128,19 +147,23 @@ One-time setup — tick these off as they're done:
   everything that IP/tag ever touched. Out of scope to fix here — VPN/Tor is the user's own
   mitigation, not something the app provides. Documented honestly in `docs/concepts/overview.md`
   and `docs/system-design.md` §3, not silently assumed safe
-- **Future phase, deliberately deferred — admin/capability model (design worked out, not built):**
-  each session gets a second, asymmetric keypair (distinct from the existing symmetric content key)
-  at creation — the admin *public* key rides along in `SessionAccessPayload` (everyone gets it, for
-  free, no new leak); the admin *private* key is the capability itself, delivered to whoever holds
-  admin rights by updating their `session_access` row (same `updateSessionAccess` mechanism Stage C's
-  migration merge uses). No RLS lock-down or Edge Function needed for this specifically: a forged
-  "grant admin" claim can't actually hand anyone a working private key, so it's inert — capability
-  security instead of server-checked security. What this does *not* give you: revocation (once
-  someone has held the key, they keep the ability forever; removing it means rotating to a new
-  keypair and redistributing it) — deliberately punted, admin-forever is fine for now. Actions/log
-  entries would fold into a renamed `messages` → `session_log` table, type-tagged only inside the
-  ciphertext (no plaintext `kind` column needed, since nothing needs pre-decryption gating once
-  forged actions are already inert)
+- **Moved to Stage E in "Next" above** — the admin/capability model write-up used to live here as a
+  deferred future phase; it's now actively being built, see Stage E for the finalized design.
+  What it still doesn't give you: revocation (once someone has held a capability, they keep the
+  ability forever; removing it means rotating to a new admin keypair and redistributing it) —
+  deliberately punted, admin-forever is fine for now.
+- **Queued for right after Stage E — runtime shape/size validation on decrypted payloads.** Every
+  payload in this schema (`DecodedMessage`, `JoinPayload`, `SessionAccessPayload`, and now capability
+  grants) is only ever type-checked at compile time (`JSON.parse(...) as T`) — nothing today verifies
+  at runtime that a decrypted payload's fields are actually the claimed type, or bounds their size,
+  before the app uses them. Not a cryptographic gap (signatures/encryption prove who sent something
+  and that it wasn't altered, not that the code consuming it is bug-free) — a plain input-validation
+  one, pre-existing across every payload type, made more worth closing now that Stage E adds new
+  payload shapes. A malformed or oversized field can't execute anything in this app today (no `eval`,
+  no `v-html` on payload content, `JSON.parse` doesn't grant real prototype access) — the realistic
+  risk is a parsing bug or a self-inflicted resource/memory issue on whoever decrypts it, not remote
+  code execution — but a small runtime check at the decrypt boundary (field types present and
+  correct, string length bounds) is cheap and worth doing regardless
 - **Even further out, deliberately deferred — tamper-evident history:** periodically hash-chain
   `session_log` snapshots and have participants cross-check the latest hash with each other
   (catches a compromised DB operator secretly rewriting or rolling back history — nothing else in
@@ -149,15 +172,15 @@ One-time setup — tick these off as they're done:
   doesn't solve equivocation — a malicious operator showing different users different histories —
   without the same participant cross-check anyway, at which point the external chain adds little)
 - A Supabase Edge Function as a general RLS-bypassing gate for security-sensitive mutations was the
-  first idea explored here and is **not** the direction taken — the capability model above needs no
+  first idea explored here and is **not** the direction taken — the Stage E capability model needs no
   such gate for authority; an Edge Function may still matter later for cryptographic operations
-  Postgres itself can't do (e.g. real ECDSA verification), if a use case for that specifically
-  arises
+  Postgres itself can't do (e.g. server-side signature verification), if a use case for that
+  specifically arises
 - Invite links are single-use and expire after 10 minutes now (`claimJoinAccess`,
   `isJoinAccessExpired` in `src/api/sessions.ts`), but any participant — not just the session's
-  owner — can currently mint one. Restricting that to the owner needs a `role` check in
-  `SessionView.vue`'s Invite button, which is easy client-side but, like everything else here, not
-  server-enforced until the capability verifier above exists
+  owner/admin — can currently mint one. Stage E's capability layer is what finally closes this: once
+  invite is guarded, minting one needs the invite capability's key as an actual argument, not just a
+  client-side `role` check that nothing enforces
 
 ## Docs
 

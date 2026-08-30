@@ -197,8 +197,8 @@ onMounted(async () => {
     }
     ownPrivateKey = privateKey
 
-    const ownerPub = await deriveLookupTag(privateKey, 'session-access')
-    const rows = await fetchSessionAccessForOwner(ownerPub)
+    const ownerTag = await deriveLookupTag(privateKey, 'session-access')
+    const rows = await fetchSessionAccessForOwner(ownerTag)
     if (!rows.length) {
       status.value = 'not-found'
       return

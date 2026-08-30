@@ -121,7 +121,7 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
-### v0.9.0 — 2026-08-30 (Vitest test suite)
+### v0.10.0 — 2026-08-30 (Vitest test suite)
 - **Added:** `npm test` (Vitest) covering `src/lib/`'s pure logic and the non-Supabase-dependent
   parts of `src/api/sessions.ts`. Every assertion mirrors a claim this session had previously only
   verified with a throwaway `node script.mjs` and discarded — DH reciprocity, seal/open round trips,
@@ -131,8 +131,8 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   any of them fails CI immediately, instead of waiting for a live bug report
 - **Mocked, not real, coverage for `src/api/`:** a minimal hand-rolled chainable/thenable stand-in for
   supabase-js's query builder, just enough to cover the exact chain shapes `sessions.ts` uses. This
-  catches "wrong table or column name" regressions (exactly what a rename like `owner_pub` →
-  `owner_tag` or `messages` → `session_log` risks) without needing real Supabase access, which this
+  catches "wrong table or column name" regressions (exactly what the `owner_pub` → `owner_tag` and
+  `messages` → `session_log` rename below risked) without needing real Supabase access, which this
   sandbox has never had. It proves nothing about RLS behavior or real schema state — that's still
   only verified by the user's live device testing, unchanged
 - **Environment split:** plain Node by default (fast, matches how these functions were always run
@@ -147,6 +147,19 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   Node-only tests passed fine. Fixed by bumping `ci.yml` to Node 22 and adding an `engines.node`
   field to `package.json` so the requirement is explicit rather than only discoverable by a red CI
   run. A good first real demonstration of the CI wiring actually catching something
+
+### v0.9.0 — 2026-08-30 (Stage E, part 1: schema renames)
+- **Renamed:** `session_access.owner_pub` → `owner_tag` (it's a one-way derived lookup tag, never a
+  real public key — the old name actively implied a property it doesn't have) and `messages` →
+  `session_log` (Stage E will add non-message entry kinds — renames, capability grants — to this
+  table; still message-only for now). Pure rename, no behavior change, no new columns
+- **Requires a Supabase migration run in lockstep with the merge** — Preview and Production share one
+  database, so running the SQL early (while this PR is still just in review) would break the live
+  production app immediately, since unrelated code on `main` still expects the old names. Run the
+  migration right when merging, not before
+- First piece of Stage E's admin/capability layer (see `docs/system-design.md` §3) — the rest
+  (per-session admin keys, per-identity signing keys, capability derivation, guarded invite) follow
+  in their own PRs
 
 ### v0.8.0 — 2026-08-29 (message history pagination)
 - **Added:** `SessionView.vue` used to fetch every `messages` row for a session on open, decrypting

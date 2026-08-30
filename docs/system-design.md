@@ -109,7 +109,7 @@ work, not part of this model.
 sessions (id uuid pk, created_at)                          -- an opaque container, nothing else
 
 session_access (                                            -- "who can find this session, with what key"
-  id uuid pk, owner_pub text, ciphertext text, iv text,
+  id uuid pk, owner_tag text, ciphertext text, iv text,
   ephemeral_public_key text, created_at
 )
 
@@ -121,7 +121,7 @@ session_participants (                       -- who's in a session — session_i
   id uuid pk, session_id fk → sessions, ciphertext text, iv text, created_at
 )
 
-messages (
+session_log (                              -- renamed from `messages`; still message-only until Stage E
   id uuid pk, session_id fk → sessions, ciphertext text, iv text, created_at
 )
 
@@ -134,7 +134,7 @@ session_invites (                        -- Stage D: add an account by a public 
 )
 
 private_account_state (                                       -- reserved, not yet used by any shipped feature
-  id uuid pk, owner_pub text, ciphertext text, iv text,
+  id uuid pk, owner_tag text, ciphertext text, iv text,
   ephemeral_public_key text, created_at
 )
 ```
@@ -146,12 +146,12 @@ Every payload type below lives in `src/lib/sessionTypes.ts` unless noted otherwi
 
 | Table | Looked up by | Encrypted with | Decrypts to | Notes |
 |---|---|---|---|---|
-| `session_access` | `owner_pub` (a derived lookup tag, not a real public key) | ECIES sealed to the row's owner — `sealForRecipient`/`openSealed`, using the row's own `ephemeral_public_key` | `SessionAccessPayload { sessionId, sessionKey, role: 'owner' \| 'member', title?, identityPublicKeyIds? }` | `sessionKey` (a JWK) is the actual credential this row exists to deliver — everything else is metadata about it. `title` is declared but nothing writes it yet (see below). `identityPublicKeyIds` is a private hint only the account itself can read — see "An account can migrate a guest session it already holds" |
+| `session_access` | `owner_tag` (a derived lookup tag, not a real public key) | ECIES sealed to the row's owner — `sealForRecipient`/`openSealed`, using the row's own `ephemeral_public_key` | `SessionAccessPayload { sessionId, sessionKey, role: 'owner' \| 'member', title?, identityPublicKeyIds? }` | `sessionKey` (a JWK) is the actual credential this row exists to deliver — everything else is metadata about it. `title` is declared but nothing writes it yet (see below). `identityPublicKeyIds` is a private hint only the account itself can read — see "An account can migrate a guest session it already holds" |
 | `join_access` | `id` (the row's own uuid, carried directly in the join link) | A raw AES-256 key carried in the link's URL fragment (`generateJoinSecret`/`importJoinKey`) — no key agreement, no persistent identity on either end | `JoinPayload { sessionId, sessionKey }` | Same payload shape as `session_invites` below; the two differ only in *how the reader gets the key*, not in what the key unlocks |
 | `session_invites` | `tag` (a pairwise-derived value, independently computable by inviter and invitee only) | Pairwise ECDH secret between the inviter's and invitee's real keypairs (`derivePairwiseKey`) | `JoinPayload { sessionId, sessionKey }` | `tag` itself is `derivePairwiseTag` of that same shared secret — see "Pairwise discoverable secrets" in `lib/crypto.ts` |
-| `session_participants` | `session_id` (plaintext) | The session's own shared AES-256 key — symmetric, the same key `messages` uses, no key agreement needed since holding the session key already proves membership | a bare string — just the participant's canonical public key id, **not** a JSON object | One row per identity that's ever sent a message under that key. No display name and no role live here; a name is resolved live per-message (see `messages` below), and role lives on each viewer's own `session_access` row instead |
-| `messages` | `session_id` (plaintext) | The session's own shared AES-256 key | `DecodedMessage { sender, text, createdAt }` | `sender` is a public key id — resolved to a display name live at render time (an `accounts` lookup, falling back to a deterministic guest name), never stored as a name anywhere |
-| `private_account_state` | `owner_pub`, same scheme as `session_access` | ECIES sealed, same as `session_access` | *(no payload type exists yet — reserved for a future feature, not written by anything shipped)* | |
+| `session_participants` | `session_id` (plaintext) | The session's own shared AES-256 key — symmetric, the same key `session_log` uses, no key agreement needed since holding the session key already proves membership | a bare string — just the participant's canonical public key id, **not** a JSON object | One row per identity that's ever sent a message under that key. No display name and no role live here; a name is resolved live per-message (see `session_log` below), and role lives on each viewer's own `session_access` row instead |
+| `session_log` | `session_id` (plaintext) | The session's own shared AES-256 key | `DecodedMessage { sender, text, createdAt }` | `sender` is a public key id — resolved to a display name live at render time (an `accounts` lookup, falling back to a deterministic guest name), never stored as a name anywhere |
+| `private_account_state` | `owner_tag`, same scheme as `session_access` | ECIES sealed, same as `session_access` | *(no payload type exists yet — reserved for a future feature, not written by anything shipped)* | |
 | `accounts` | `username` or `public_key`, both plaintext | Not encrypted at all | n/a | The one table with intentionally plaintext, searchable columns — see "account is just another identity" below |
 | `sessions` | `id` | Not encrypted at all | n/a | Literally just an id and a timestamp — an opaque container row, nothing else in it |
 
@@ -171,10 +171,10 @@ recovers the same shared secret. Every encrypted table in this schema — `sessi
 here is a new algorithm, just ECDH + AES-GCM applied to a one-time keypair instead of a long-term
 identity.
 
-**Why `session_access.owner_pub` isn't a real public key.** An account's actual public key is
+**Why `session_access.owner_tag` isn't a real public key.** An account's actual public key is
 already public information (`accounts.public_key`, intentionally searchable) — using it directly as
 the lookup column for "which sessions does this identity have" would let anyone who already knows
-that public key run exactly that query and reconstruct the membership graph. Instead, `owner_pub` is
+that public key run exactly that query and reconstruct the membership graph. Instead, `owner_tag` is
 `deriveLookupTag(privateKey, 'session-access')`: a
 SHA-256 digest of the private key's scalar plus a purpose string. It's stable (the same identity
 always re-derives the same tag, so one query finds every session_access row it owns), but
@@ -224,7 +224,7 @@ to anything else), but any account participating normally was.
 
 The fix reuses a pattern already in the schema rather than inventing one: each row's identity is now
 symmetrically encrypted with that *session's own shared key* — the exact same key and the exact same
-`encryptText`/`decryptText` functions `messages` already use. No ECDH, no `ephemeral_public_key`
+`encryptText`/`decryptText` functions `session_log` already use. No ECDH, no `ephemeral_public_key`
 column needed here, because this isn't sealed to one specific recipient — anyone who legitimately
 holds the session key (i.e., is already a real participant, via their own `session_access` row) can
 decrypt every row for that session. `session_id` stays a plaintext lookup column — "this session has
@@ -442,7 +442,7 @@ while a cross-session aggregation would cost something new. Scope stays per-sess
 **Honest limitation: this protects database *content*, not network-level traffic patterns.** Nothing
 here stops a party with visibility into requests reaching the server — the hosting operator, or
 anyone watching network traffic to it — from observing "this IP repeatedly fetches rows tagged with
-this `owner_pub`" or "these two IPs both touch this session's rows," independent of anything being
+this `owner_tag`" or "these two IPs both touch this session's rows," independent of anything being
 encrypted. That correlation isn't nothing: `createAccount` sends a plaintext username at account
 creation, and `fetchSessionAccessForOwner` is called with the *same stable* tag every time that
 account checks its chat list — so a single moment where an IP is tied to a username (a signup
@@ -464,7 +464,7 @@ tamper with a row in ways an honest client would reject, but nothing here stops 
 see `docs/experience.md` for why that's deliberately out of scope for now."
 
 **Message history loads a window at a time, not all at once.** `SessionView.vue` used to fetch every
-`messages` row for a session on open — fine for a young session, but a cost that only grows, paid on
+`session_log` row for a session on open — fine for a young session, but a cost that only grows, paid on
 every open, for one that's been running a long time. `fetchMessagesInRange(sessionId, sinceISO,
 beforeISO)` (`src/api/sessions.ts`) fetches a `MESSAGE_PAGE_DAYS`-wide slice (7 days) using the same
 plaintext `created_at` column the latest-activity sort already reads — no new metadata exposed, just a
@@ -518,8 +518,8 @@ it just makes the claim checkable rather than trusted. Consequence: `session_par
 grows from a bare public-key-id string to `{publicKeyId, signingPublicKeyJwk}`, so participants can
 actually verify each other's signatures.
 
-*`messages` is renamed to `session_log`, and every entry is signed by whoever actually wrote it and
-carries a `kind`* (`'message' | 'rename' | 'capability-grant'`, extensible) *inside the decrypted
+*Every `session_log` entry is signed by whoever actually wrote it and carries a `kind`*
+(`'message' | 'rename' | 'capability-grant'`, extensible) *inside the decrypted
 payload* — no plaintext `kind` column, since nothing needs pre-decryption gating (a forged entry is
 already inert once the signature check fails). `kind` decides rendering: messages render as bubbles;
 `rename` and `capability-grant` render as centered system-style tags, the same convention chat apps

@@ -5,11 +5,15 @@
 import type { Page } from '@playwright/test'
 import { expect } from './fixtures'
 
-// A sent message is never rendered optimistically anywhere in this app —
-// every bubble appears only once Supabase Realtime echoes the row back (see
-// start-session-and-message.spec.ts's flakiness writeup in docs/experience.md).
-// Every wait for a message here uses this instead of Playwright's 5s default.
-export const RENDER_TIMEOUT = 15000
+// Every action here does at least one real round trip to the live Supabase
+// project (see playwright.config.ts) — an insert, a select, or (for a sent
+// message) a Realtime echo, which is never optimistic anywhere in this app
+// (see start-session-and-message.spec.ts's flakiness writeup in
+// docs/experience.md). CI has shown that a plain round trip can occasionally
+// take a few seconds, not just the Realtime one — so every wait in this file
+// uses this instead of Playwright's 5s default, not only the ones that
+// happen to be message-related.
+export const NETWORK_TIMEOUT = 20000
 
 /** accounts.username is globally unique in the live database — always generate one, never hardcode. */
 export function uniqueUsername(prefix: string): string {
@@ -23,11 +27,11 @@ export async function createAccount(page: Page, username: string): Promise<strin
   await page.getByRole('button', { name: 'Create account' }).click()
 
   const linkInput = page.locator('input[readonly]')
-  await expect(linkInput).toBeVisible()
+  await expect(linkInput).toBeVisible({ timeout: NETWORK_TIMEOUT })
   const accountLink = await linkInput.inputValue()
 
   await page.getByRole('button', { name: 'Continue' }).click()
-  await expect(page.getByText('Signed in as')).toBeVisible()
+  await expect(page.getByText('Signed in as')).toBeVisible({ timeout: NETWORK_TIMEOUT })
   return accountLink
 }
 
@@ -41,38 +45,48 @@ export async function logIn(page: Page, accountLinkOrKey: string): Promise<void>
   await page.getByRole('button', { name: 'Log in' }).click()
   await page.getByPlaceholder('Paste your account link or key').fill(accountLinkOrKey)
   await page.getByRole('button', { name: 'Log in' }).click()
-  await expect(page.getByText('Signed in as')).toBeVisible()
+  await expect(page.getByText('Signed in as')).toBeVisible({ timeout: NETWORK_TIMEOUT })
 }
 
 /** From AccountHome: starts a session, returns the sessionId from the `#/mysession/<id>` URL. */
 export async function startSessionAsAccount(page: Page): Promise<string> {
   await page.getByRole('button', { name: 'Start a session' }).click()
-  await expect(page).toHaveURL(/#\/mysession\//)
+  await expect(page).toHaveURL(/#\/mysession\//, { timeout: NETWORK_TIMEOUT })
   return page.url().split('#/mysession/')[1]
 }
 
 /** From the logged-out home screen: starts a session as a guest, returns the packed key from the URL. */
 export async function startSessionAsGuest(page: Page): Promise<string> {
   await page.getByRole('button', { name: 'Start a session' }).click()
-  await expect(page).toHaveURL(/#\/session\//)
+  await expect(page).toHaveURL(/#\/session\//, { timeout: NETWORK_TIMEOUT })
   return page.url().split('#/session/')[1]
 }
 
-/** From an open SessionView: sends a message and waits for it to render as your own bubble. */
+/**
+ * From an open SessionView: sends a message and waits for it to render as
+ * your own bubble. Scoped to a bubble containing this exact text (every
+ * caller uses a `Date.now()`-suffixed message, so it's unique) rather than
+ * asserting on `.bubble.mine` as a whole — a page can already have more than
+ * one "own" bubble by the time this is called (e.g. after adopting a guest
+ * identity, its earlier messages become "mine" too), and asserting on the
+ * whole locator then fails as a strict-mode violation, not a timeout.
+ */
 export async function sendMessage(page: Page, text: string): Promise<void> {
   await page.getByPlaceholder('Message…').fill(text)
   await page.getByRole('button', { name: 'Send' }).click()
-  await expect(page.locator('.bubble.mine')).toContainText(text, { timeout: RENDER_TIMEOUT })
+  await expect(page.locator('.bubble.mine').filter({ hasText: text })).toBeVisible({ timeout: NETWORK_TIMEOUT })
 }
 
 /** From an open SessionView: waits for a message (any sender) to appear in the thread. */
 export async function expectMessageVisible(page: Page, text: string): Promise<void> {
-  await expect(page.locator('.bubble').filter({ hasText: text }).first()).toBeVisible({ timeout: RENDER_TIMEOUT })
+  await expect(page.locator('.bubble').filter({ hasText: text }).first()).toBeVisible({ timeout: NETWORK_TIMEOUT })
 }
 
 /** From an open SessionView: waits for a message to appear rendered as this viewer's own (no sender label). */
 export async function expectOwnMessageVisible(page: Page, text: string): Promise<void> {
-  await expect(page.locator('.bubble.mine').filter({ hasText: text }).first()).toBeVisible({ timeout: RENDER_TIMEOUT })
+  await expect(page.locator('.bubble.mine').filter({ hasText: text }).first()).toBeVisible({
+    timeout: NETWORK_TIMEOUT,
+  })
 }
 
 /**
@@ -83,15 +97,15 @@ export async function expectOwnMessageVisible(page: Page, text: string): Promise
  */
 export async function expectMessageSender(page: Page, text: string, expectedSenderName: string): Promise<void> {
   const bubble = page.locator('.bubble.theirs').filter({ hasText: text }).first()
-  await expect(bubble).toBeVisible({ timeout: RENDER_TIMEOUT })
-  await expect(bubble.locator('.sender')).toHaveText(expectedSenderName)
+  await expect(bubble).toBeVisible({ timeout: NETWORK_TIMEOUT })
+  await expect(bubble.locator('.sender')).toHaveText(expectedSenderName, { timeout: NETWORK_TIMEOUT })
 }
 
 /** From a guest SessionView: opens the personal-link warning panel and returns the link. */
 export async function getPersonalLink(page: Page): Promise<string> {
   await page.getByRole('button', { name: '⚠ Warning' }).click()
   const input = page.locator('.warning-block input[readonly]')
-  await expect(input).toBeVisible()
+  await expect(input).toBeVisible({ timeout: NETWORK_TIMEOUT })
   return input.inputValue()
 }
 
@@ -100,7 +114,7 @@ export async function getJoinLink(page: Page): Promise<string> {
   await page.getByRole('button', { name: 'Invite ▾' }).click()
   await page.getByRole('button', { name: 'By join link' }).click()
   const input = page.locator('.modal-box input[readonly]')
-  await expect(input).not.toHaveValue('Generating…')
+  await expect(input).not.toHaveValue('Generating…', { timeout: NETWORK_TIMEOUT })
   const link = await input.inputValue()
   await page.getByRole('button', { name: 'Close' }).click()
   return link
@@ -112,7 +126,7 @@ export async function sendInviteByKey(page: Page, publicKeyBlob: string): Promis
   await page.getByRole('button', { name: 'By public key' }).click()
   await page.getByPlaceholder('Paste their public key').fill(publicKeyBlob)
   await page.getByRole('button', { name: 'Send invite' }).click()
-  await expect(page.getByText('Invite sent to')).toBeVisible()
+  await expect(page.getByText('Invite sent to')).toBeVisible({ timeout: NETWORK_TIMEOUT })
   await page.getByRole('button', { name: 'Close' }).click()
 }
 
@@ -121,7 +135,7 @@ export async function getMyPublicKey(page: Page): Promise<string> {
   await page.getByRole('button', { name: 'Account ▾' }).click()
   await page.getByRole('button', { name: 'My public key' }).click()
   const input = page.locator('.modal-box input[readonly]')
-  await expect(input).toBeVisible()
+  await expect(input).toBeVisible({ timeout: NETWORK_TIMEOUT })
   const key = await input.inputValue()
   await page.getByRole('button', { name: 'Close' }).click()
   return key
@@ -135,9 +149,9 @@ export async function getMyPublicKey(page: Page): Promise<string> {
 export async function acceptPendingInvite(page: Page): Promise<string> {
   await page.reload()
   const acceptButton = page.getByRole('button', { name: 'Accept' })
-  await expect(acceptButton).toBeVisible({ timeout: RENDER_TIMEOUT })
+  await expect(acceptButton).toBeVisible({ timeout: NETWORK_TIMEOUT })
   await acceptButton.click()
-  await expect(page).toHaveURL(/#\/mysession\//)
+  await expect(page).toHaveURL(/#\/mysession\//, { timeout: NETWORK_TIMEOUT })
   return page.url().split('#/mysession/')[1]
 }
 
@@ -145,7 +159,7 @@ export async function acceptPendingInvite(page: Page): Promise<string> {
 export async function joinAsGuestViaLink(page: Page, joinLink: string): Promise<string> {
   await page.goto(joinLink)
   await page.getByRole('button', { name: 'Join as guest' }).click()
-  await expect(page).toHaveURL(/#\/session\//)
+  await expect(page).toHaveURL(/#\/session\//, { timeout: NETWORK_TIMEOUT })
   return page.url().split('#/session/')[1]
 }
 
@@ -157,7 +171,9 @@ export async function adoptGuestFromAccountSide(page: Page, guestPersonalLinkOrK
   await page.getByRole('button', { name: 'Adopt account' }).click()
   // The modal closes itself on success (showAdoptModal.value = false) — its
   // input disappearing is the confirmation, there's no separate success text.
-  await expect(page.getByPlaceholder('Paste their private key or personal link')).toHaveCount(0)
+  await expect(page.getByPlaceholder('Paste their private key or personal link')).toHaveCount(0, {
+    timeout: NETWORK_TIMEOUT,
+  })
 }
 
 /** From a guest SessionView: merges this guest identity into an account via "+ Add to account". */
@@ -165,5 +181,5 @@ export async function addToAccountFromGuestSide(page: Page, accountLinkOrKey: st
   await page.getByRole('button', { name: '+ Add to account' }).click()
   await page.getByPlaceholder('Paste your account link').fill(accountLinkOrKey)
   await page.getByRole('button', { name: 'Log in & add' }).click()
-  await expect(page).toHaveURL(/#\/mysession\//)
+  await expect(page).toHaveURL(/#\/mysession\//, { timeout: NETWORK_TIMEOUT })
 }

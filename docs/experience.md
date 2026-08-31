@@ -142,6 +142,16 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.13.0 — 2026-08-31 (pull further skill updates from the template)
+- **Synced `.claude/skills/`** again (`update-skills`): adds the new `add-statefulness` skill, which
+  works out whether an app needs a database at all (vs. `localStorage`, a document, or realtime)
+  before committing to Supabase setup — `add-database` now assumes that decision was already made
+  and routes through it. `ship-feature` gained a one-time-per-session check for further skill drift
+  and a "consider unit tests" step that offers test-coverage bundles the same way the doc gate offers
+  doc surfaces. `update-skills` itself now correctly says a skill update takes effect only in a new
+  session with *this project's repo selected*, not just any new conversation — a real correction to
+  a previous version of this same skill's own closing message. No app code changed.
+
 ### v0.12.0 — 2026-08-31 (pull skill updates from the template)
 - **Synced `.claude/skills/`** with the template (`update-skills`): `add-database`, `finish-setup`,
   and `ship-feature` picked up fixes for links and SQL landing dead inside `AskUserQuestion`'s

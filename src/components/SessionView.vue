@@ -221,8 +221,19 @@ function nameFor(publicKeyId: string): string {
 }
 
 function resolveName(publicKeyId: string) {
-  if (participantNames.has(publicKeyId)) return
-  participantNames.set(publicKeyId, guestNameForKey(publicKeyId)) // instant placeholder, also guards re-fetching
+  const placeholder = guestNameForKey(publicKeyId)
+  // A cached value that's still exactly the placeholder means no account
+  // lookup has ever actually succeeded for this key yet — try again. A null
+  // result from fetchAccountByPublicKey means either "this really is a
+  // guest with no account" or "the request itself failed" (a dropped
+  // connection, a flaky mobile network), and those are indistinguishable
+  // from here; retrying on every call this key is asked about again (once
+  // per message/tag mentioning it) self-heals from the second case at
+  // near-zero cost, instead of permanently mistaking a transient failure
+  // for a settled "no account" answer the way a one-shot guard would.
+  const current = participantNames.get(publicKeyId)
+  if (current !== undefined && current !== placeholder) return // already resolved to a real account name
+  participantNames.set(publicKeyId, placeholder)
   fetchAccountByPublicKey(publicKeyId).then((account) => {
     if (account) participantNames.set(publicKeyId, account.username)
   })

@@ -276,6 +276,23 @@ one symptom seen; it's the general rule anything resolving a name through this p
 project-wide: never bake a `nameFor(...)` result into a value stored ahead of render, only ever call it
 live from somewhere Vue's reactivity is already re-running.
 
+**A second, deeper bug surfaced right after fixing the one above**, from the same round of manual
+testing, on a real mobile connection (2 bars, not wifi): the same public key resolved to its real
+username in one tag but stayed on its guest-style placeholder in another, on the *same* screen, even
+after the reactive fix — including a user failing to resolve their own name on their own screen. Since
+every tag reads from one shared reactive map, a key that resolves correctly anywhere should resolve
+everywhere; this wasn't the "baked in before render" bug again, it was `resolveName`'s one-shot guard
+(`if (participantNames.has(id)) return`) treating its own *attempt* as permanent settlement regardless
+of whether the attempt actually succeeded. `fetchAccountByPublicKey` returning nothing is genuinely
+ambiguous — "this really is a guest with no account" and "the request itself failed" (a dropped
+connection, exactly the kind a flaky mobile network produces) look identical from the caller's side —
+and the guard was permanently committing to the first reading the moment either one happened once.
+Fixed by changing the guard from "have I ever tried" to "do I already have a *real*, non-placeholder
+answer": a key stuck on its own placeholder gets retried every time something asks about it again
+(once per message or tag mentioning that identity), which self-heals a transient failure at near-zero
+cost, while a key that's already resolved to a real name is still never re-fetched. A true guest
+identity just keeps quietly failing the same lookup every time it's asked about, which is correct.
+
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)

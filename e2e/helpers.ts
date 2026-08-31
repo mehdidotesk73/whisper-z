@@ -183,6 +183,24 @@ export async function getJoinLink(page: Page, manifest: TestManifest): Promise<s
 
 /** From an open SessionView: sends a public-key invite to the given (packed) public key blob. */
 export async function sendInviteByKey(page: Page, publicKeyBlob: string): Promise<void> {
+  await submitInviteByKey(page, publicKeyBlob)
+  await page.getByRole('button', { name: 'Close' }).click()
+}
+
+/**
+ * Same as sendInviteByKey, but clicks the inline "Undo" next to "Invite
+ * sent to…" instead of closing — see undoLastInvite's doc comment in
+ * SessionView.vue: only works while this exact invite is still in memory,
+ * right after sending, which this helper's whole point is to exercise.
+ */
+export async function sendInviteByKeyThenUndo(page: Page, publicKeyBlob: string): Promise<void> {
+  await submitInviteByKey(page, publicKeyBlob)
+  await page.getByRole('button', { name: 'Undo' }).click()
+  await expect(page.getByText('Invite sent to')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Close' }).click()
+}
+
+async function submitInviteByKey(page: Page, publicKeyBlob: string): Promise<void> {
   await page.getByRole('button', { name: 'Invite ▾' }).click()
   await page.getByRole('button', { name: 'By public key' }).click()
   const input = page.getByPlaceholder('Paste their public key')
@@ -246,7 +264,6 @@ export async function sendInviteByKey(page: Page, publicKeyBlob: string): Promis
         (debugErrors.length ? `App debug log:\n${debugErrors.join('\n')}` : '(debug log had no error/warn entries)'),
     )
   }
-  await page.getByRole('button', { name: 'Close' }).click()
 }
 
 /**

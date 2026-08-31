@@ -15,6 +15,12 @@ dist-ssr
 # TypeScript incremental build state
 *.tsbuildinfo
 
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
 # NOTE: package-lock.json is intentionally NOT ignored — CI runs `npm ci`,
 # which fails without a committed lockfile.
 

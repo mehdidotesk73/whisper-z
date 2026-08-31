@@ -658,15 +658,51 @@ src/components/
 **Tests:** `npm test` (Vitest) — pure logic in `src/lib/` (crypto primitives, hash routing, guest
 naming) and the non-Supabase-dependent parts of `src/api/sessions.ts`, using a minimal mocked query
 builder to catch table/column-name regressions without needing a real backend. Nothing that calls
-Supabase for real is exercised — that still needs live device testing, same as before Vitest existed.
+Supabase for real is exercised here — that's what the E2E layer below is for.
 Config lives in `vite.config.ts`'s `test` block (plain Node environment by default, since that
 matches how these functions were already being verified — standalone Node scripts using `webcrypto` —
 before they became permanent tests; a file needing `window` opts into jsdom via a
-`// @vitest-environment jsdom` docblock at its top, see `src/lib/route.test.ts`).
+`// @vitest-environment jsdom` docblock at its top, see `src/lib/route.test.ts`). Scoped to `src/**`
+(`include: ['src/**/*.{test,spec}.ts']`) so it never picks up the Playwright specs under `e2e/`, which
+use a different `test`/`expect` entirely.
+
+**End-to-end tests run against the live database.** `npm run test:e2e` (Playwright,
+`playwright.config.ts`) drives a real browser against `npm run dev` (not a production build/preview —
+`vite-plugin-pwa` only registers a service worker in prod, and a cached SW between runs is the last
+thing this suite needs), talking to the actual Supabase project — not a separate test project. That's
+a deliberate choice, not an oversight: RLS is `using(true)` everywhere already, so a test-created
+account or session is no more exposed than any other row, and there is no other real user yet whose
+data a test run could collide with. The alternative (a second Supabase project just for CI) would have
+added real setup (schema, secrets, seed/teardown) for a risk this app doesn't currently have.
+
+Every identity a test creates (an account keypair, a guest keypair, an admin) gets handed to the
+`manifest` fixture (`e2e/fixtures.ts`) via `manifest.track(packedPrivateKey)` — once per identity, right
+after it's created. At teardown the fixture re-derives that identity's `session-access` lookup tag
+(the same `deriveLookupTag` call the app itself makes), finds its `session_access` row(s), opens the
+sealed payload to recover the `sessionId`, and deletes: the `session_access` row explicitly, plus the
+`sessions` row (which cascades to `session_log` and `session_participants` — the only two tables with
+a real `ON DELETE CASCADE` FK to `sessions`; confirmed by querying
+`information_schema.referential_constraints` directly, since `join_access`, `session_invites`, and
+`private_account_state` have no enforced FK at all despite one being described in this doc). This
+manifest-based delete is the *primary* cleanup mechanism, not a nice-to-have on top of something
+else — it runs whether the test passed or failed, and doesn't depend on any schema change. Its one gap
+is a CI runner that dies before the fixture's teardown executes (killed mid-run, cancelled), which
+leaves orphaned rows with no automatic backstop; treat that as a manual sweep for now (delete-by-age
+against `sessions`/`accounts`) rather than something worth an FK/schema change for, unless it turns out
+to happen often.
+
+**Not yet verified working in real CI.** This sandbox's outbound network is proxied and policy-scoped;
+attempting the E2E run here got the browser's request to Supabase rejected with a 403 policy denial at
+the proxy (confirmed via the proxy's own status endpoint, not a guess) — a sandbox-network limitation,
+not a defect found in the test or the app. The code passes `npm run build` and `npm test` and is
+believed correct, but the first real signal on whether it actually reaches Supabase and passes comes
+from this PR's own GitHub Actions run.
 
 **Production and preview, both via Netlify** (see `netlify.toml`): `main` pushes build production; every other branch/PR gets its own Deploy Preview.
 
-**PR build check:** `.github/workflows/ci.yml` runs `npm run build` then `npm test` on every PR, both inside the one `build` status check the branch ruleset requires. It doesn't deploy anything.
+**PR build check:** `.github/workflows/ci.yml` runs `npm run build`, `npm test`, then installs a
+Chromium browser and runs `npm run test:e2e`, all inside the one `build` status check the branch
+ruleset requires. It doesn't deploy anything.
 
 **Conventions:**
 - Components: PascalCase, one per file

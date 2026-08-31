@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "types": ["node"],
+    "outDir": "./node_modules/.tmp/tsconfig-e2e",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig-e2e.tsbuildinfo"
+  },
+  // e2e/ imports directly from src/lib and src/api (the same crypto/session
+  // helpers the app uses, so cleanup derives the exact same tags — see
+  // e2e/fixtures.ts). TS project references require every reachable file to
+  // be listed in the consuming project, so those two folders ride along here
+  // rather than e2e/ trying to import across into tsconfig.json's project.
+  // Deliberately not `src/**/*.ts`: that would pull in main.ts, which
+  // imports App.vue, which drags every component (and their own tsconfig
+  // project) in with it — src/lib and src/api don't import any .vue file.
+  "include": ["e2e/**/*.ts", "playwright.config.ts", "src/lib/**/*.ts", "src/api/**/*.ts", "src/debug.ts"]
+}

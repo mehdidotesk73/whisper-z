@@ -5,6 +5,10 @@ name: CI
 # is what you select as a required status check in the branch ruleset — see
 # the finish-setup skill. Kept as one job/one name so the existing required
 # check still covers everything, rather than adding a second check to select.
+#
+# `npm run test:e2e` runs Playwright against the live Supabase project (see
+# docs/system-design.md) — every PR now creates and cleans up real rows, so
+# a scenario that used to need the user's phone runs unattended on every PR.
 
 on:
   pull_request:
@@ -26,3 +30,5 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

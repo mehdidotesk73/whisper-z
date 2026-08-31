@@ -147,6 +147,31 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   Node-only tests passed fine. Fixed by bumping `ci.yml` to Node 22 and adding an `engines.node`
   field to `package.json` so the requirement is explicit rather than only discoverable by a red CI
   run. A good first real demonstration of the CI wiring actually catching something
+- **Added a second test layer, Playwright, against the live database — deliberately, not for lack of
+  a better option.** RLS is `using(true)` everywhere already, so a test-created row is no more exposed
+  than any other, and there's no other real user yet whose data a test could collide with; a separate
+  test Supabase project would have added real setup for a risk this app doesn't currently have. See
+  "End-to-end tests run against the live database" in `docs/system-design.md` §7 for the full
+  reasoning, including the FK-cascade check that shaped how cleanup works
+- **Cleanup without a database tag.** The obvious "prefix test rows so they're identifiable" doesn't
+  work here: every table's `id` is a real `uuid` (type rejects a string prefix), and the columns that
+  actually identify ownership (`owner_tag`, etc.) are `SHA-256(privateKey || purpose)` outputs, not
+  human-chosen names — you can't tag a hash digest. Instead, `e2e/fixtures.ts`'s `manifest` fixture
+  tracks the one thing a test always has right after creating an identity — its packed private
+  key — and re-derives that identity's lookup tag at teardown to find and delete everything it
+  touched, the same way the app itself would look it up. Considered and rejected: FK-cascade deletes
+  from `sessions`/`accounts` alone, since a live check
+  (`information_schema.referential_constraints`) showed only `session_log` and `session_participants`
+  actually cascade — `session_access`, `join_access`, `session_invites`, and `private_account_state`
+  have no enforced FK at all, so a cascade-only cleanup would silently leave most of what a test
+  creates behind
+- **Couldn't verify the E2E run actually passes from this sandbox.** The browser's request to
+  Supabase came back as a 403 policy denial at this session's outbound proxy (confirmed via the
+  proxy's own status endpoint — a real egress policy decision, not a flaky timeout to chase). Vitest
+  and `npm run build` don't hit this because nothing in them makes a real network call; this is the
+  first thing in this project's test suite that does. Left unresolved on purpose rather than worked
+  around — the fix is verifying against this PR's actual GitHub Actions run, which has normal
+  internet egress, not fighting this sandbox's policy
 
 ### v0.9.0 — 2026-08-30 (Stage E, part 1: schema renames)
 - **Renamed:** `session_access.owner_pub` → `owner_tag` (it's a one-way derived lookup tag, never a

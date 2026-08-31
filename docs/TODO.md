@@ -94,8 +94,18 @@ seal/open round trips, pairwise-ECDH reciprocity, lookup-tag stability, the `key
 JWK-field-order regressions from Stage D/earlier — plus hash routing and guest naming) and
 `src/api/sessions.ts`'s non-Supabase logic (`isJoinAccessExpired`) and mocked query shape
 (`fetchMessagesInRange`/`hasMessagesBefore`, catching a wrong table/column name without a real
-backend). Wired into `.github/workflows/ci.yml` inside the existing `build` check. Nothing that calls
-Supabase for real is covered — that still needs live device testing. See `docs/system-design.md` §7.
+backend). Wired into `.github/workflows/ci.yml` inside the existing `build` check. See
+`docs/system-design.md` §7.
+
+**E2E test layer added (Playwright), against the live database** — `npm run test:e2e` drives a real
+browser through the actual app against the live Supabase project (not a separate test project — see
+"End-to-end tests run against the live database" in `docs/system-design.md` §7 for why that's safe
+here). First scenario: start a session, send a message, confirm it renders. `e2e/fixtures.ts`'s
+`manifest` fixture tracks every identity a test creates and deletes everything it touched afterward,
+re-deriving lookup tags the same way the app does rather than needing a schema tag. Wired into the
+same CI `build` check. **Not yet confirmed passing in real CI** — this sandbox's network policy
+blocks reaching Supabase directly (403 at the egress proxy), so the first real signal is this PR's own
+GitHub Actions run.
 
 ## Next (Current Sprint)
 

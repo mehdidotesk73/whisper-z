@@ -48,5 +48,9 @@ export default defineConfig({
     // eventually component tests) opt into jsdom individually via a
     // `// @vitest-environment jsdom` docblock at the top of that file.
     environment: 'node',
+    // Confined to src/ so Vitest never picks up e2e/*.spec.ts — those are
+    // Playwright tests (a different `test`/`expect`, a live dev server and
+    // database, run via `npm run test:e2e`), not Vitest's.
+    include: ['src/**/*.{test,spec}.ts'],
   },
 })

@@ -142,6 +142,16 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.12.0 — 2026-08-31 (pull skill updates from the template)
+- **Synced `.claude/skills/`** with the template (`update-skills`): `add-database`, `finish-setup`,
+  and `ship-feature` picked up fixes for links and SQL landing dead inside `AskUserQuestion`'s
+  plain-text `question` field — the step's content now always goes in a normal message first,
+  with the tool call reduced to a one-line gate. `finish-setup` also stopped pruning this file
+  against a hardcoded keep-list (it now keeps every entry and only resets Version History) and
+  gained a step to fill in `docs/concepts/overview.md` plus a sweep for stray `<REF:...>`
+  placeholders. Added the new `share-pattern` skill for writing up a generalizable discovery here
+  as a copy-pasteable block for the template repo. No app code changed
+
 ### v0.11.0 — 2026-08-31 (multi-actor E2E scenarios + a real modal bug fix)
 - **Added:** five more Playwright scenarios against the live Supabase project — account creation +
   re-login via its own link, a guest joining via a join link, a second account joining via a

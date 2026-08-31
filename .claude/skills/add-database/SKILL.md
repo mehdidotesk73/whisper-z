@@ -46,9 +46,15 @@ sync-on-load does.
 > survive. When an app needs both, use both — tables plus `postgres_changes` for the durable part,
 > Broadcast for typing indicators and presence dots.
 
-If the stored contents shouldn't be readable by whoever can read the database — messaging being the
-obvious case — see **End-to-End Encryption Over a Database You Don't Trust** in
-`docs/experience.md`. That decides the table shape, so settle it before writing the schema.
+Two worked patterns in `docs/experience.md` decide the table shape, so read the relevant one
+**before** writing the schema rather than retrofitting:
+
+- **Two-Party Link Apps** — when exactly two people share one thing via a link, with no accounts.
+  Covers handing someone a real credential in the URL fragment (and the third-party-script leak
+  that ruins it), and the conditional update that stops a third visitor silently taking over the
+  session. **Applies whether or not anything is encrypted.**
+- **End-to-End Encryption Over a Database You Don't Trust** — when the stored contents shouldn't be
+  readable by whoever can read the database. Messaging is the obvious case.
 
 Beyond that sits **accounts and login** — per-user private data, real sign-in. Supabase does it,
 it's a much bigger build, scope it as its own change.
@@ -83,8 +89,13 @@ saying otherwise is a promise the database doesn't keep.
 
 Same shape as the Netlify steps in `finish-setup`, and the same conventions apply — exact values
 never placeholders, bare URLs never backticked, one part at a time, each ending on an
-`AskUserQuestion` gate whose "yes" restates what they should be seeing. Open with the whole list so
-they know how long this is:
+`AskUserQuestion` gate whose "yes" restates what they should be seeing.
+
+**Especially here: the step goes in the message, not in the `AskUserQuestion` question.** This part
+hands over a dashboard link and a block of SQL, and both are destroyed by the question field — it
+renders as plain text, so the link stops being tappable and the SQL has to be selected by hand on a
+phone. Post the part as a markdown message with the SQL in a fenced block, *then* make the tool call
+with a one-line question. Open with the whole list so they know how long this is:
 
 > Before I can write any of this, the app needs a real database to talk to. It's a free Supabase
 > account and three short steps — about ten minutes, and it's a one-time thing.

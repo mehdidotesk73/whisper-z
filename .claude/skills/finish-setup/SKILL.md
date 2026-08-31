@@ -52,16 +52,18 @@ be one push, not a branch and PR.
   what's listed". **This is what stops a future session re-running the bootstrap on an
   already-created project** — an unstripped CLAUDE.md would tell it to go create another repo.
 
-- **`docs/experience.md` — keep only these sections, remove everything else:** Mobile-First Design
-  Constraints, Service-Worker Caching & Stale Builds, ECharts Gotchas, Pure Logic vs. Components,
-  Don't Hand-Write a Static `public/manifest.json`, `npm ci` Needs a Committed Lockfile,
-  `declaration: true` in an App's tsconfig, Ambient Types for Build-Time Constants, and Version
-  History (reset to the placeholder format, not the template's own history). The test, if you hit an
-  entry not on that list: **does this teach something about building a Vue/Vite PWA, or about
-  building the template's setup flow?** Keep the first, drop the second. Most of what's there is the
-  second — onboarding flow, Netlify UX, skills design — and has no bearing on a project that will
-  never re-run that bootstrap. Shipping it verbatim would hand every project a confusing journal
-  about a different piece of software.
+- **`docs/experience.md` — keep every entry; only reset Version History** to the placeholder format
+  rather than carrying the template's own version list.
+
+  **Don't prune it against a remembered list.** The template already did that separation: entries
+  about building the template's setup flow live in `template-memory/`, which never ships, so what
+  arrives in a scaffold is already the project-relevant set — stack gotchas plus reusable patterns
+  like the end-to-end-encryption one. A hardcoded keep-list here used to duplicate that judgement
+  and went stale the moment the template gained an entry, silently deleting good material on its
+  next run. If something genuinely doesn't belong, the test is: **does this teach something about
+  building a Vue/Vite PWA, or about building the template's setup flow?** The second shouldn't be
+  in the file at all — if you find one, it's a template bug worth reporting, not something to
+  quietly drop here.
 
 - **`docs/TODO.md` — seed the one-time setup checklist** under **Next**:
 
@@ -73,12 +75,31 @@ be one push, not a branch and PR.
   - [ ] First feature: <their first described feature>
   ```
 
+- **`docs/concepts/overview.md` — fill it in; this one is user-facing.** It ships with
+  `<REF:purpose>` and `<REF:UI-shape>` in it, and it is **rendered inside the app's Help modal** —
+  so an unfilled placeholder isn't a scruffy doc, it's `<REF:purpose>` displayed to whoever uses
+  the app. Substitute both, in plain language aimed at someone using the app rather than building
+  it. The generic Q&A below them (PWA caching, offline, reporting a bug) is already written for end
+  users — keep it.
+
 - **`.claude/skills/` — leave untouched.** Already generic; nothing to personalize.
 
 - **`docs/setup-brief.md` — delete it.** Its whole job was carrying the intake across the repo
   switch, and that's done. Removing it is also what marks setup as no longer pending: the guard at
   the top of `CLAUDE.md` keys off its presence, and a stripped `CLAUDE.md` plus an absent brief are
   two independent reasons a later session won't try to re-bootstrap this project.
+
+**Then sweep for stragglers, don't trust this list.** A file added to the template later won't be
+on it — that is exactly how `docs/concepts/overview.md` shipped unfilled to real projects. Before
+moving on:
+
+```
+grep -rn "<REF:" . --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.claude
+```
+
+It must come back empty. (`.claude/skills/` is excluded because the skills discuss `<REF:*>` as a
+concept; they contain no placeholders to fill.) Anything it finds is a file this list forgot —
+fill it, and say so, since the omission is a template bug worth fixing at the source.
 
 Verify `npm run build` passes, commit (e.g. "Personalize scaffold for `<project name>`"), and push
 directly to `main`.
@@ -100,6 +121,7 @@ Two reasons this is worth doing here rather than later:
   fix, rather than as a mysteriously stuck first PR.
 
 If the run fails, fix it before continuing; a red `build` becomes a required check shortly.
+
 
 ## Show them where they are
 
@@ -152,6 +174,26 @@ trouble.
    - **"It didn't work as expected"** with the free-text box
    - A third option when there's a known fork worth catching, e.g. *"It worked but the URL has a
      random name like dreamy-yeot-7cce7c."*
+
+   **The steps go in the message. Only the question goes in the question.** This is the one that
+   has actually broken steps in testing. `AskUserQuestion` renders its `question` as plain text —
+   **no clickable links, no code blocks, no copy button.** A step whose body is packed into that
+   field reaches the user as a wall of unformatted text with a dead URL they must retype and SQL
+   they must select by hand on a phone. Both of the things you worked hardest to give them — the
+   link and the copyable value — are destroyed by putting them there.
+
+   So every guided step is two parts, in this order:
+
+   1. **A normal assistant message** carrying the whole step — the progress block, the numbered
+      instructions, the URL, any SQL in a fenced code block. This renders as markdown, so links are
+      tappable and code gets a copy control.
+   2. **Then the `AskUserQuestion` call**, whose `question` is one short line pointing back at it:
+      *"Did that work?"* or *"Is the ruleset showing as Active?"* The options carry the restated
+      outcomes.
+
+   Never restate the instructions inside the question, and never put a URL, a block of SQL, or any
+   value to be copied there. "The turn ends on the gate" means the tool call is the last thing in
+   the turn — not that the turn is *only* the tool call.
 
 When they report a problem, diagnose from what they describe before sending them anywhere new. Ask
 for a screenshot if it's ambiguous — faster than three rounds of questions.

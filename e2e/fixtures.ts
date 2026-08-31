@@ -19,7 +19,24 @@ import {
 } from '../src/lib/crypto'
 import { supabase } from '../src/api/supabase'
 import { toEnvelope } from '../src/api/sessions'
-import { extractPackedKey } from '../src/lib/route'
+
+/**
+ * A deliberately local re-implementation of route.ts's extractPackedKey,
+ * not an import of it: route.ts reads `window.location.hash` at module load
+ * time, which is fine inside a browser page but crashes here — this file is
+ * imported by Playwright's own Node-side test-collection process (no DOM at
+ * all) before any browser is even launched. Handles exactly the two shapes
+ * this file's callers pass in: a bare packed key, or a full `#/session/<key>`
+ * or `#/account/<key>` link (any origin).
+ */
+function extractPackedKey(pastedOrKey: string): string {
+  const trimmed = pastedOrKey.trim()
+  const hashIndex = trimmed.indexOf('#')
+  const hash = hashIndex !== -1 ? trimmed.slice(hashIndex) : trimmed.startsWith('/') ? `#${trimmed}` : `#/${trimmed}`
+  const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean)
+  if ((parts[0] === 'session' || parts[0] === 'account') && parts[1]) return parts[1]
+  return trimmed
+}
 
 export interface TestManifest {
   /**

@@ -316,6 +316,18 @@ export async function deriveLookupTag(privateKey: CryptoKey, purpose: string): P
   return bufToBase64(digest)
 }
 
+/**
+ * A capability (Stage E) is the exact same one-way derivation deriveLookupTag
+ * already does — SHA-256(privateKey || purpose) — aliased under its own name
+ * because here the result IS the usable secret being granted, not a value
+ * used to search a table. Admin derives any capability on demand from
+ * adminEcdhPrivateKey and never stores one; see docs/system-design.md §3's
+ * "Stage E" entry for the full capability-grant design.
+ */
+export async function deriveCapability(adminEcdhPrivateKey: CryptoKey, purpose: string): Promise<string> {
+  return deriveLookupTag(adminEcdhPrivateKey, purpose)
+}
+
 // --- Pairwise discoverable secrets (session invites) -------------------------
 // ECDH is symmetric: ECDH(A_priv, B_pub) === ECDH(B_priv, A_pub). Both public
 // keys are already published (accounts.public_key), so two accounts can

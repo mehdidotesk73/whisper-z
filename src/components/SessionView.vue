@@ -2,7 +2,9 @@
 import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   importPrivateKey,
+  importPublicKey,
   publicJwkFromPrivateJwk,
+  publicKeyFromCanonicalId,
   canonicalPublicKeyId,
   deriveLookupTag,
   openSealed,
@@ -15,6 +17,7 @@ import {
   unpackJwk,
   derivePersonalSigningKeyPair,
   importEcdsaPublicKey,
+  importEcdsaPrivateKey,
   signData,
   verifySignature,
 } from '../lib/crypto'
@@ -31,13 +34,21 @@ import {
   fetchParticipants,
   subscribeParticipants,
   type ParticipantRow,
+  type SessionAccessRow,
 } from '../api/sessions'
-import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
+import type { SessionAccessPayload, JoinPayload, DecodedMessage, CapabilityGrantEntry, SessionLogEntry } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
-import { isIdentityMerged, migrateGuestSessionToAccount, parseParticipantPayload } from '../api/sessionActions'
+import {
+  isIdentityMerged,
+  migrateGuestSessionToAccount,
+  parseParticipantPayload,
+  hasCapability,
+  grantCapability,
+  acceptCapabilityGrant,
+} from '../api/sessionActions'
 import { createSessionInvite, rejectInvite } from '../api/inviteActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
@@ -53,12 +64,12 @@ const props = defineProps<{ packedKey?: string; sessionId?: string }>()
 type Status = 'loading' | 'ready' | 'not-found'
 const status = ref<Status>('loading')
 
-interface RenderedMessage {
-  id: string
-  mine: boolean
-  sender: string
-  text: string
-}
+// A capability-grant entry renders as a centered system tag, never a chat
+// bubble — see docs/system-design.md §3's "Stage E" entry ("kind decides
+// rendering").
+type RenderedMessage =
+  | { id: string; kind: 'message'; mine: boolean; sender: string; text: string }
+  | { id: string; kind: 'system'; text: string }
 
 const messages = ref<RenderedMessage[]>([])
 const draft = ref('')
@@ -87,6 +98,7 @@ let ownPrivateKey: CryptoKey | null = null
 // The identity used to SEND: a guest's one-off key, or an account's real
 // key (always — even for a migrated session, see onMounted below).
 let ownPublicKeyId = ''
+let ownPublicKey: CryptoKey | null = null
 // The whole opened SessionAccessPayload for this route's identity — kept
 // around (not just the few fields destructured above) so migrateToAccount
 // and the invite builders below can forward Stage E's admin key fields
@@ -94,6 +106,24 @@ let ownPublicKeyId = ''
 // migrateGuestSessionToAccount doc comment for why passing the whole
 // payload, not a narrower parameter list, matters.
 let ownAccessPayload: SessionAccessPayload | null = null
+// The raw row backing ownAccessPayload — needed for its `id`, the only
+// piece acceptCapabilityGrant needs beyond the payload itself, to self-write
+// a newly recovered capability back into this exact row.
+let ownAccessRow: SessionAccessRow | null = null
+// Reactive mirror of hasCapability(ownAccessPayload, 'invite') — the plain
+// `let` above isn't template-reactive, and this can change mid-session (a
+// grant arriving live), unlike everything else read from ownAccessPayload,
+// which is only ever consulted at the moment an action button is clicked.
+const canInvite = ref(false)
+const isOwner = ref(false) // reactive mirror of ownAccessPayload?.role === 'owner', for the admin-only Grant button
+// Other participants seen so far (session_participants + anyone who's sent
+// a message), for the admin-only "grant invite access" panel — never
+// includes ownPublicKeyId. capabilityGrantsSeen tracks which of them
+// already hold 'invite', purely from watching capability-grant entries go
+// by in the log, so the panel doesn't offer to re-grant something already
+// granted.
+const otherParticipantIds = ref<string[]>([])
+const grantedCapabilities = reactive(new Map<string, Set<string>>()) // publicKeyId -> capabilities granted
 // A message sent from here on is signed with the sender's own personal
 // signing key (derived, not stored — see lib/crypto.ts) and verified against
 // the sender's signingPublicKey published in their session_participants
@@ -112,6 +142,9 @@ async function registerParticipantRow(row: Pick<ParticipantRow, 'ciphertext' | '
     const parsed = parseParticipantPayload(decrypted)
     if (parsed.signingPublicKey) {
       participantSigningKeys.set(parsed.publicKeyId, await importEcdsaPublicKey(parsed.signingPublicKey))
+    }
+    if (parsed.publicKeyId !== ownPublicKeyId && !otherParticipantIds.value.includes(parsed.publicKeyId)) {
+      otherParticipantIds.value.push(parsed.publicKeyId)
     }
   } catch {
     // Not decryptable with this session's key — shouldn't happen, ignore.
@@ -161,12 +194,60 @@ async function scrollToBottom() {
   scrollAnchor.value?.scrollIntoView({ block: 'end' })
 }
 
-async function decodeMessage(row: { id: string; ciphertext: string; iv: string }): Promise<RenderedMessage | null> {
+/**
+ * Self-accepts a capability grant addressed to this identity (a no-op if it
+ * isn't), then renders the grant as a system tag for everyone regardless —
+ * the grant itself is visible to and verifiable by the whole session, only
+ * the sealed secret inside it is private to the grantee. See
+ * sessionActions.ts's acceptCapabilityGrant and CapabilityGrantEntry's own
+ * doc comment.
+ */
+async function handleCapabilityGrant(id: string, entry: CapabilityGrantEntry): Promise<RenderedMessage> {
+  let existing = grantedCapabilities.get(entry.granteePublicKeyId)
+  if (!existing) {
+    existing = new Set()
+    grantedCapabilities.set(entry.granteePublicKeyId, existing)
+  }
+  existing.add(entry.capability)
+
+  if (
+    entry.granteePublicKeyId === ownPublicKeyId &&
+    ownAccessRow &&
+    ownAccessPayload &&
+    ownPrivateKey &&
+    ownPublicKey &&
+    !hasCapability(ownAccessPayload, entry.capability)
+  ) {
+    const updated = await acceptCapabilityGrant(
+      entry,
+      ownPublicKeyId,
+      ownPrivateKey,
+      ownPublicKey,
+      ownAccessRow,
+      ownAccessPayload,
+    )
+    if (updated) {
+      ownAccessPayload = updated
+      if (entry.capability === 'invite') canInvite.value = true
+    } else {
+      logDebug(`Could not accept capability grant ${id}: signature or seal did not check out`, 'warn')
+    }
+  }
+
+  resolveName(entry.granteePublicKeyId)
+  const name = nameFor(entry.granteePublicKeyId)
+  const text = entry.capability === 'invite' ? `${name} can now send invites` : `${name} was granted "${entry.capability}" access`
+  return { id, kind: 'system', text }
+}
+
+async function decodeLogEntry(row: { id: string; ciphertext: string; iv: string }): Promise<RenderedMessage | null> {
   if (seenMessageIds.has(row.id) || !sessionKey) return null
   seenMessageIds.add(row.id)
   try {
     const json = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
-    const plain = JSON.parse(json) as DecodedMessage
+    const plain = JSON.parse(json) as SessionLogEntry
+
+    if (plain.kind === 'capability-grant') return await handleCapabilityGrant(row.id, plain)
 
     // A legacy message (sent before Stage E) has no kind/signature at all —
     // still trusted, exactly as it always was; nothing here retroactively
@@ -189,15 +270,15 @@ async function decodeMessage(row: { id: string; ciphertext: string; iv: string }
     }
 
     resolveName(plain.sender)
-    return { id: row.id, mine: myKeys.has(plain.sender), sender: plain.sender, text: plain.text }
+    return { id: row.id, kind: 'message', mine: myKeys.has(plain.sender), sender: plain.sender, text: plain.text }
   } catch (err) {
-    logDebug(`Could not decrypt message ${row.id}: ${err}`, 'warn')
+    logDebug(`Could not decrypt session_log entry ${row.id}: ${err}`, 'warn')
     return null
   }
 }
 
 async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string }) {
-  const decoded = await decodeMessage(row)
+  const decoded = await decodeLogEntry(row)
   if (!decoded) return
   messages.value.push(decoded)
   scrollToBottom()
@@ -223,7 +304,7 @@ async function loadMore() {
     const older = await fetchMessagesInRange(activeSessionId, newWindowStart, windowStart.value)
     const decoded: RenderedMessage[] = []
     for (const row of older) {
-      const msg = await decodeMessage(row)
+      const msg = await decodeLogEntry(row)
       if (msg) decoded.push(msg)
     }
     messages.value.unshift(...decoded)
@@ -252,6 +333,7 @@ onMounted(async () => {
       const privateKeyJwk = unpackJwk(props.packedKey)
       privateKey = await importPrivateKey(privateKeyJwk)
       ownPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
+      ownPublicKey = await importPublicKey(publicJwkFromPrivateJwk(privateKeyJwk))
       myKeys = new Set([ownPublicKeyId])
     } else {
       status.value = 'not-found'
@@ -273,11 +355,13 @@ onMounted(async () => {
         const candidate = await openSealed<SessionAccessPayload>(toEnvelope(row), privateKey)
         if (candidate.sessionId === props.sessionId) {
           access = candidate
+          ownAccessRow = row
           break
         }
       }
     } else {
       access = await openSealed<SessionAccessPayload>(toEnvelope(rows[0]), privateKey)
+      ownAccessRow = rows[0]
     }
     if (!access) {
       status.value = 'not-found'
@@ -287,6 +371,8 @@ onMounted(async () => {
     sessionKeyJwk = access.sessionKey
     sessionKey = await importSessionKey(access.sessionKey)
     ownAccessPayload = access
+    canInvite.value = hasCapability(access, 'invite')
+    isOwner.value = access.role === 'owner'
 
     // Populate participantSigningKeys before loading any messages below, so
     // the very first render can verify signatures rather than treating
@@ -300,6 +386,7 @@ onMounted(async () => {
       // username for everyone. The pinned identityPublicKeyId (if any) only
       // extends "mine" to also cover messages sent before migration.
       ownPublicKeyId = currentAccount.value!.publicKeyId
+      ownPublicKey = currentAccount.value!.publicKey
       myKeys = new Set([ownPublicKeyId, ...(access.identityPublicKeyIds ?? [])])
       sessionAliasKeys.value = access.identityPublicKeyIds ?? []
     } else if (currentAccount.value) {
@@ -374,7 +461,7 @@ const inviteLink = ref('')
 const copiedInvite = ref(false)
 
 async function generateInvite() {
-  if (!sessionKeyJwk) return
+  if (!sessionKeyJwk || !canInvite.value) return
   copiedInvite.value = false
   inviteLink.value = ''
   try {
@@ -415,7 +502,7 @@ const lastInviteRecipient = ref('')
 const undoingInvite = ref(false)
 
 async function sendInviteByKey() {
-  if (!ownPrivateKey || !sessionKeyJwk) return
+  if (!ownPrivateKey || !sessionKeyJwk || !canInvite.value) return
   const pasted = inviteByKeyInput.value.trim()
   if (!pasted) return
 
@@ -560,6 +647,48 @@ function toggleAliases() {
   showAliases.value = opening
 }
 
+// Admin-only: grant another participant the 'invite' capability (Stage E).
+// Visible only when ownAccessPayload.role === 'owner' — see the template.
+const showGrant = ref(false)
+const grantingTo = ref<string | null>(null)
+const grantError = ref('')
+
+function toggleGrant() {
+  const opening = !showGrant.value
+  closeAllPanels()
+  showGrant.value = opening
+  grantError.value = ''
+}
+
+function hasBeenGrantedInvite(participantId: string): boolean {
+  return grantedCapabilities.get(participantId)?.has('invite') ?? false
+}
+
+async function grantInviteTo(participantId: string) {
+  if (!sessionKey || !ownAccessPayload?.adminEcdhPrivateKey || !ownAccessPayload.adminSigningPrivateKey) return
+  grantingTo.value = participantId
+  grantError.value = ''
+  try {
+    const adminEcdhPrivateKey = await importPrivateKey(ownAccessPayload.adminEcdhPrivateKey)
+    const adminSigningPrivateKey = await importEcdsaPrivateKey(ownAccessPayload.adminSigningPrivateKey)
+    const granteePublicKeyJwk = publicKeyFromCanonicalId(participantId)
+    const ok = await grantCapability(
+      activeSessionId,
+      sessionKey,
+      adminEcdhPrivateKey,
+      adminSigningPrivateKey,
+      granteePublicKeyJwk,
+      'invite',
+    )
+    if (!ok) grantError.value = 'Could not send the grant — try again.'
+  } catch (err) {
+    logDebug(`grantInviteTo failed: ${err}`, 'error')
+    grantError.value = 'Could not send the grant — try again.'
+  } finally {
+    grantingTo.value = null
+  }
+}
+
 // Invite menu: a small popover offering the two ways to invite, each
 // opening its panel in a modal rather than inline. The popover itself is
 // MenuButton (see components/MenuButton.vue) — it owns closing itself and
@@ -583,6 +712,7 @@ function closeAllPanels() {
   showWarning.value = false
   showMigrate.value = false
   showAliases.value = false
+  showGrant.value = false
 }
 
 // Warning/Migrate are inline panels that actually live inside panelArea's
@@ -623,12 +753,15 @@ function goHome() {
         >
           Signed in as <strong>{{ currentAccount.account.username }}</strong>
         </span>
-        <MenuButton v-if="status === 'ready'" label="Invite ▾" tone="tone-blue" class="invite-menu-wrap">
+        <MenuButton v-if="status === 'ready' && canInvite" label="Invite ▾" tone="tone-blue" class="invite-menu-wrap">
           <template #default="{ select }">
             <button class="menu-item" @click="select(openInviteModal)">By join link</button>
             <button class="menu-item" @click="select(openInviteByKeyModal)">By public key</button>
           </template>
         </MenuButton>
+        <button v-if="status === 'ready' && isOwner" class="chip-ghost tone-neutral" @click.stop="toggleGrant">
+          Grant access ▾
+        </button>
       </div>
 
       <div class="top-bar">
@@ -716,6 +849,21 @@ function goHome() {
       </p>
     </Modal>
 
+    <Modal :open="showGrant" title="Grant invite access" @close="showGrant = false">
+      <p class="hint">Let someone else in this session send invites too, without giving them full admin.</p>
+      <ul v-if="otherParticipantIds.length" class="alias-list">
+        <li v-for="id in otherParticipantIds" :key="id" class="grant-row">
+          <span>{{ nameFor(id) }}</span>
+          <span v-if="hasBeenGrantedInvite(id)" class="hint">Already granted</span>
+          <button v-else class="new-link" :disabled="grantingTo === id" @click="grantInviteTo(id)">
+            {{ grantingTo === id ? 'Granting…' : 'Grant invite access' }}
+          </button>
+        </li>
+      </ul>
+      <p v-else class="hint">No one else has joined this session yet.</p>
+      <p v-if="grantError" class="error">{{ grantError }}</p>
+    </Modal>
+
     <p v-if="status === 'loading'" class="status">Loading…</p>
     <p v-else-if="status === 'not-found'" class="status error">
       This session doesn't exist — check the link you followed.
@@ -729,10 +877,13 @@ function goHome() {
           </button>
         </li>
         <li v-if="!messages.length" class="empty">No messages yet — say hello.</li>
-        <li v-for="m in messages" :key="m.id" :class="['bubble', m.mine ? 'mine' : 'theirs']">
-          <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
-          {{ m.text }}
-        </li>
+        <template v-for="m in messages" :key="m.id">
+          <li v-if="m.kind === 'system'" class="system-tag">{{ m.text }}</li>
+          <li v-else :class="['bubble', m.mine ? 'mine' : 'theirs']">
+            <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
+            {{ m.text }}
+          </li>
+        </template>
         <li ref="scrollAnchor" class="anchor"></li>
       </ul>
 
@@ -1002,6 +1153,26 @@ function goHome() {
   border-radius: 0.9rem;
   word-break: break-word;
   white-space: pre-wrap;
+}
+
+.system-tag {
+  align-self: center;
+  max-width: 90%;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.grant-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
 }
 
 .sender {

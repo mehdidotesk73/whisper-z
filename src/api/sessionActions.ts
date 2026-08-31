@@ -10,6 +10,7 @@ import {
   exportPublicKey,
   exportPrivateKey,
   importPrivateKey,
+  importPublicKey,
   publicJwkFromPrivateJwk,
   generateSessionKey,
   exportSessionKey,
@@ -19,11 +20,15 @@ import {
   sealForRecipient,
   openSealed,
   deriveLookupTag,
+  deriveCapability,
   packJwk,
   unpackJwk,
   canonicalPublicKeyId,
   generateAdminSigningKeyPair,
   derivePersonalSigningKeyPair,
+  signData,
+  verifySignature,
+  importEcdsaPublicKey,
 } from '../lib/crypto'
 import {
   createSession,
@@ -32,12 +37,95 @@ import {
   addParticipant,
   fetchParticipants,
   fetchSessionAccessForOwner,
+  sendMessage,
   toEnvelope,
   type SessionAccessRow,
 } from './sessions'
 import { extractPackedKey } from '../lib/route'
-import type { SessionAccessPayload, JoinPayload, ParticipantPayload } from '../lib/sessionTypes'
+import type { SessionAccessPayload, JoinPayload, ParticipantPayload, CapabilityGrantEntry } from '../lib/sessionTypes'
 import type { CurrentAccount } from '../lib/auth'
+
+/** Admin holds every capability by derivation; a member holds only what it's been granted and self-written. */
+export function hasCapability(payload: Pick<SessionAccessPayload, 'role' | 'capabilities'>, capability: string): boolean {
+  return payload.role === 'owner' || !!payload.capabilities?.[capability]
+}
+
+/** Same field order at grant time and verify time — see grantCapability/acceptCapabilityGrant below. */
+function capabilityGrantSigningInput(entry: Omit<CapabilityGrantEntry, 'kind' | 'signature'>): string {
+  return JSON.stringify({
+    kind: 'capability-grant',
+    granteePublicKeyId: entry.granteePublicKeyId,
+    capability: entry.capability,
+    timestamp: entry.timestamp,
+    sealedSecret: entry.sealedSecret,
+  })
+}
+
+/**
+ * Admin grants a capability to another participant — an ordinary session_log
+ * entry (see CapabilityGrantEntry's doc comment for why it's folded in
+ * rather than a dedicated table). Only admin can call this meaningfully:
+ * deriving the capability's actual value requires adminEcdhPrivateKey, which
+ * only the session creator's own row ever holds.
+ */
+export async function grantCapability(
+  sessionId: string,
+  sessionKey: CryptoKey,
+  adminEcdhPrivateKey: CryptoKey,
+  adminSigningPrivateKey: CryptoKey,
+  granteePublicKeyJwk: JsonWebKey,
+  capability: string,
+): Promise<boolean> {
+  const granteePublicKey = await importPublicKey(granteePublicKeyJwk)
+  const capabilityValue = await deriveCapability(adminEcdhPrivateKey, capability)
+  const sealedSecret = await sealForRecipient(capabilityValue, granteePublicKey)
+  const unsigned = {
+    granteePublicKeyId: canonicalPublicKeyId(granteePublicKeyJwk),
+    capability,
+    timestamp: new Date().toISOString(),
+    sealedSecret,
+  }
+  const signature = await signData(adminSigningPrivateKey, capabilityGrantSigningInput(unsigned))
+  const entry: CapabilityGrantEntry = { kind: 'capability-grant', ...unsigned, signature }
+  const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(entry))
+  return sendMessage(sessionId, ciphertext, iv)
+}
+
+/**
+ * The grantee's side: verify the grant really came from this session's
+ * admin, then self-write the recovered capability value into `capabilities`
+ * on the caller's own session_access row (accessRow/accessPayload — the row
+ * this identity already opened for itself, guest or account alike). Returns
+ * false (a no-op, not an error) for a grant addressed to someone else, or
+ * one whose signature doesn't check out. Returns the updated payload (not
+ * just a boolean) so the caller can sync its own in-memory copy — e.g. to
+ * flip a UI gate on immediately — without re-deriving anything itself.
+ */
+export async function acceptCapabilityGrant(
+  entry: CapabilityGrantEntry,
+  ownPublicKeyId: string,
+  ownPrivateKey: CryptoKey,
+  ownPublicKey: CryptoKey,
+  accessRow: SessionAccessRow,
+  accessPayload: SessionAccessPayload,
+): Promise<SessionAccessPayload | null> {
+  if (entry.granteePublicKeyId !== ownPublicKeyId) return null
+  if (!accessPayload.adminSigningPublicKey) return null
+
+  const adminSigningKey = await importEcdsaPublicKey(accessPayload.adminSigningPublicKey)
+  const signingInput = capabilityGrantSigningInput(entry)
+  const valid = await verifySignature(adminSigningKey, entry.signature, signingInput)
+  if (!valid) return null
+
+  const capabilityValue = await openSealed<string>(entry.sealedSecret, ownPrivateKey)
+  const payload: SessionAccessPayload = {
+    ...accessPayload,
+    capabilities: { ...(accessPayload.capabilities ?? {}), [entry.capability]: capabilityValue },
+  }
+  const sealed = await sealForRecipient(payload, ownPublicKey)
+  const ok = await updateSessionAccess(accessRow.id, sealed)
+  return ok ? payload : null
+}
 
 /**
  * A session_participants row decrypts to a bare public-key-id string if it

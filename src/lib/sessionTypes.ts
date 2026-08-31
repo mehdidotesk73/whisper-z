@@ -1,5 +1,6 @@
 // Shapes of the payloads sealed inside session_access and join_access rows.
 // Pure types — no logic, no I/O.
+import type { SealedEnvelope } from './crypto'
 
 export interface SessionAccessPayload {
   sessionId: string
@@ -40,6 +41,16 @@ export interface SessionAccessPayload {
    */
   adminEcdhPrivateKey?: JsonWebKey
   adminSigningPrivateKey?: JsonWebKey
+  /**
+   * Capabilities this identity has been granted (Stage E) — purpose ->
+   * the derived capability value itself, recovered by opening a
+   * capability-grant session_log entry addressed to this identity and
+   * self-written here (api/sessionActions.ts's acceptCapabilityGrant).
+   * Absent for a plain, ungranted member. The admin's own row never needs
+   * this — hasCapability treats role === 'owner' as holding everything,
+   * since admin can derive any capability on demand instead.
+   */
+  capabilities?: Record<string, string>
 }
 
 export interface JoinPayload {
@@ -80,3 +91,29 @@ export interface DecodedMessage {
   kind?: 'message'
   signature?: string
 }
+
+/**
+ * A capability grant (Stage E) — an ordinary session_log entry, visible to
+ * and verifiable by every participant (signed by admin's signing key, over
+ * every field here except signature itself), but useful only to its
+ * grantee: `sealedSecret` is a second, independent ECIES seal to the
+ * grantee's real identity key, carrying the actual derived capability value
+ * (see lib/crypto.ts's deriveCapability). Nobody else can open it. The
+ * grantee discovers their grant simply by reading the thread they're
+ * already loading, verifies the signature, then self-writes the recovered
+ * value into their own session_access row's `capabilities` map — see
+ * docs/system-design.md §3's "Stage E" entry for why this is folded into
+ * session_log rather than a dedicated table (a grant is otherwise
+ * indistinguishable from an ordinary message at the database level).
+ */
+export interface CapabilityGrantEntry {
+  kind: 'capability-grant'
+  granteePublicKeyId: string
+  capability: string
+  timestamp: string
+  signature: string
+  sealedSecret: SealedEnvelope
+}
+
+/** What a session_log row can decrypt to, from here on — see each variant's own doc comment. */
+export type SessionLogEntry = DecodedMessage | CapabilityGrantEntry

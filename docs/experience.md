@@ -121,6 +121,66 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 
 (Record major releases here as you merge features. Example format below.)
 
+### v0.10.0 — 2026-08-30 (Vitest test suite)
+- **Added:** `npm test` (Vitest) covering `src/lib/`'s pure logic and the non-Supabase-dependent
+  parts of `src/api/sessions.ts`. Every assertion mirrors a claim this session had previously only
+  verified with a throwaway `node script.mjs` and discarded — DH reciprocity, seal/open round trips,
+  lookup-tag stability per identity/purpose, an uninvolved third party's inability to reproduce a
+  pairwise tag or decrypt, the `key_ops`-stripping fix, and the JWK-field-order fix behind
+  `canonicalPublicKeyId`. Turning those into permanent tests means a future change that reintroduces
+  any of them fails CI immediately, instead of waiting for a live bug report
+- **Mocked, not real, coverage for `src/api/`:** a minimal hand-rolled chainable/thenable stand-in for
+  supabase-js's query builder, just enough to cover the exact chain shapes `sessions.ts` uses. This
+  catches "wrong table or column name" regressions (exactly what the `owner_pub` → `owner_tag` and
+  `messages` → `session_log` rename below risked) without needing real Supabase access, which this
+  sandbox has never had. It proves nothing about RLS behavior or real schema state — that's still
+  only verified by the user's live device testing, unchanged
+- **Environment split:** plain Node by default (fast, matches how these functions were always run
+  during manual verification) with jsdom opted into per-file (`// @vitest-environment jsdom`) only
+  where needed — `route.ts` reads `window.location` and registers a `hashchange` listener at module
+  load time, so importing it at all requires a `window` to exist
+- Wired into `.github/workflows/ci.yml` as an additional step inside the existing `build` job/check,
+  rather than a second required check to configure
+- **Found immediately by CI itself:** `ci.yml` was still pinned to Node 20, and jsdom 30 requires
+  Node ≥22 — `route.test.ts` (the one file needing jsdom) crashed on CI with `webidl.util.markAsUncloneable
+  is not a function`, a jsdom/undici internal that doesn't exist on Node 20, while the other 26
+  Node-only tests passed fine. Fixed by bumping `ci.yml` to Node 22 and adding an `engines.node`
+  field to `package.json` so the requirement is explicit rather than only discoverable by a red CI
+  run. A good first real demonstration of the CI wiring actually catching something
+- **Added a second test layer, Playwright, against the live database — deliberately, not for lack of
+  a better option.** RLS is `using(true)` everywhere already, so a test-created row is no more exposed
+  than any other, and there's no other real user yet whose data a test could collide with; a separate
+  test Supabase project would have added real setup for a risk this app doesn't currently have. See
+  "End-to-end tests run against the live database" in `docs/system-design.md` §7 for the full
+  reasoning, including the FK-cascade check that shaped how cleanup works
+- **Cleanup without a database tag.** The obvious "prefix test rows so they're identifiable" doesn't
+  work here: every table's `id` is a real `uuid` (type rejects a string prefix), and the columns that
+  actually identify ownership (`owner_tag`, etc.) are `SHA-256(privateKey || purpose)` outputs, not
+  human-chosen names — you can't tag a hash digest. Instead, `e2e/fixtures.ts`'s `manifest` fixture
+  tracks the one thing a test always has right after creating an identity — its packed private
+  key — and re-derives that identity's lookup tag at teardown to find and delete everything it
+  touched, the same way the app itself would look it up. Considered and rejected: FK-cascade deletes
+  from `sessions`/`accounts` alone, since a live check
+  (`information_schema.referential_constraints`) showed only `session_log` and `session_participants`
+  actually cascade — `session_access`, `join_access`, `session_invites`, and `private_account_state`
+  have no enforced FK at all, so a cascade-only cleanup would silently leave most of what a test
+  creates behind
+- **Couldn't verify the E2E run from this sandbox — verified from real CI instead.** The browser's
+  request to Supabase came back as a 403 policy denial at this session's outbound proxy (confirmed via
+  the proxy's own status endpoint — a real egress policy decision, not a flaky timeout to chase).
+  Vitest and `npm run build` don't hit this because nothing in them makes a real network call; this was
+  the first thing in this project's test suite that does. Pushed anyway and checked the PR's actual
+  GitHub Actions run, which passed — confirming the harness genuinely reaches Supabase and cleans up
+  after itself outside this sandbox
+- **First real run surfaced a genuine timing issue, not a harness bug.** The scenario failed once
+  (`.bubble.mine` not found within the default 5s) then passed on Playwright's automatic retry a few
+  seconds later. Root cause: `send()` in `SessionView.vue` doesn't render a sent message optimistically
+  — it only inserts into `session_log`, and the bubble appears once Supabase Realtime echoes the INSERT
+  back through `subscribeMessages`. On a freshly-opened Realtime channel (this is the first message
+  sent in that browser instance), that round trip occasionally runs past 5s. Fixed by giving that one
+  assertion a 15s timeout instead of leaning on the retry to hide it — a retry that happens to pass
+  isn't the same as a test that reliably captures the real latency it's asserting on
+
 ### v0.9.0 — 2026-08-30 (Stage E, part 1: schema renames)
 - **Renamed:** `session_access.owner_pub` → `owner_tag` (it's a one-way derived lookup tag, never a
   real public key — the old name actively implied a property it doesn't have) and `messages` →

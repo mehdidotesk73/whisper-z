@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { VitePWA } from 'vite-plugin-pwa'
@@ -39,5 +40,17 @@ export default defineConfig({
   define: {
     __BUILD_ID__: JSON.stringify(process.env.VITE_BUILD_ID || 'dev'),
     __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
+  test: {
+    // Plain Node by default — fast, and matches how the pure lib/ functions
+    // already got verified all along (standalone Node scripts using
+    // webcrypto). Files that touch `window` (route.ts's hashchange listener,
+    // eventually component tests) opt into jsdom individually via a
+    // `// @vitest-environment jsdom` docblock at the top of that file.
+    environment: 'node',
+    // Confined to src/ so Vitest never picks up e2e/*.spec.ts — those are
+    // Playwright tests (a different `test`/`expect`, a live dev server and
+    // database, run via `npm run test:e2e`), not Vitest's.
+    include: ['src/**/*.{test,spec}.ts'],
   },
 })

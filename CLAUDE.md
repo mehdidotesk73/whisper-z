@@ -72,12 +72,20 @@ whatever they're actually asking about.
   branch ruleset requires it to pass before merge. That's a backstop, not a substitute: run
   `npm run build` locally before pushing rather than letting CI find it — a red check on the user's
   PR is noise they have to interpret.
-- There is **no test suite** yet. A passing build is the bar.
-- **No third-party APIs.** The app has no external data dependencies today. It will need a shared
-  database (Supabase, via the `add-database` skill) once messages have to sync between the two
-  participants' devices — until that's wired up, storage and sync **cannot be reproduced in this
-  sandbox**, so reason about the encryption/session logic from the code and lean on the user's
-  on-device screenshots/logs to validate. Be honest about what you can't verify offline.
+- **Tests:** `npm test` (Vitest, `vitest run`) covers `src/lib/`'s pure logic (crypto primitives, hash
+  routing, guest naming) and `src/api/sessions.ts`'s non-Supabase-dependent logic and mocked query
+  shape. **Run it alongside `npm run build` before every commit that touches tested code** — CI runs
+  both in the same `build` check.
+- **E2E tests (`npm run test:e2e`, Playwright) run against the live Supabase project** — a real
+  browser driving the actual app, not mocks. See "End-to-end tests run against the live database" in
+  `docs/system-design.md` §7 for why testing against production data is the deliberate choice here
+  (RLS is `using(true)` everywhere, so a test row is no more exposed than any other) and how cleanup
+  works without a schema change (`e2e/fixtures.ts`'s `manifest` fixture). **This sandbox's own network
+  cannot reach Supabase** (outbound requests get a 403 policy denial at the proxy) — so this suite
+  can be written and type-checked here, but only a real CI run or the user's own machine can confirm
+  it actually passes. Say so plainly rather than claiming it works from a build/typecheck pass alone.
+- Nothing else here calls Supabase for real, so day-to-day dev still leans on the user's live device
+  testing for anything Vitest and Playwright don't already cover.
 
 ## Deploys
 
@@ -101,9 +109,12 @@ src/
   env.d.ts                 ambient types: vite/client, PWA virtual module, __BUILD_ID__/__BUILD_TIME__
   api/                     Supabase client + data access, once the shared database is wired up
   lib/                     pure computation — key derivation, encrypt/decrypt, session helpers
+                           (*.test.ts co-located per file — Vitest, see Build & verify)
   components/
     HelpModal.vue          renders docs/concepts/*.md into the Help modal
     <feature components>   one component per screen — Start chat, Join chat, Chat view
+e2e/                       Playwright specs against the live Supabase project + the
+                           manifest/cleanup fixture (see Build & verify) — `npm run test:e2e`
 .claude/skills/
   finish-setup/SKILL.md    scaffold personalization + one-time hosting setup
   ship-feature/SKILL.md    the change loop: branch → build → PR → links → doc gate
@@ -117,7 +128,7 @@ docs/
   concepts/*.md            per-page user docs (rendered into the Help modal)
 public/
   favicon.svg, logo-192.png, logo-512.png   placeholder icons — replace with real branding
-.github/workflows/ci.yml       build check on every PR (required by the branch ruleset)
+.github/workflows/ci.yml       build + test + E2E check on every PR (required by the branch ruleset)
 netlify.toml                   preview-deploy config (Netlify)
 package-lock.json              committed — CI runs `npm ci` and needs it
 ```

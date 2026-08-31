@@ -89,6 +89,25 @@ to match so the view doesn't jump. Whether to show the button is a real existenc
 (`hasMessagesBefore`) run after each load, not assumed — see "Message history loads a window at a
 time" in `docs/system-design.md` §3.
 
+**Test suite added (Vitest)** — `npm test` covers `src/lib/`'s pure logic (crypto primitives —
+seal/open round trips, pairwise-ECDH reciprocity, lookup-tag stability, the `key_ops` and
+JWK-field-order regressions from Stage D/earlier — plus hash routing and guest naming) and
+`src/api/sessions.ts`'s non-Supabase logic (`isJoinAccessExpired`) and mocked query shape
+(`fetchMessagesInRange`/`hasMessagesBefore`, catching a wrong table/column name without a real
+backend). Wired into `.github/workflows/ci.yml` inside the existing `build` check. See
+`docs/system-design.md` §7.
+
+**E2E test layer added (Playwright), against the live database** — `npm run test:e2e` drives a real
+browser through the actual app against the live Supabase project (not a separate test project — see
+"End-to-end tests run against the live database" in `docs/system-design.md` §7 for why that's safe
+here). First scenario: start a session, send a message, confirm it renders. `e2e/fixtures.ts`'s
+`manifest` fixture tracks every identity a test creates and deletes everything it touched afterward,
+re-deriving lookup tags the same way the app does rather than needing a schema tag. Wired into the
+same CI `build` check, confirmed passing on GitHub Actions (this sandbox's own network can't reach
+Supabase at all, so that PR run was the first real signal) — see `docs/system-design.md` §7 for the
+one real timing issue it surfaced (a sent message renders only once Realtime echoes it back, not
+optimistically) and the fix.
+
 ## Next (Current Sprint)
 
 Continuing the session-model rebuild, in order:

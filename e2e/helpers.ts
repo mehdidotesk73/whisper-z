@@ -161,8 +161,20 @@ export async function getJoinLink(page: Page, manifest: TestManifest): Promise<s
   manifest.trackJoinAccess(firstLink.split('#/join/')[1].split('/')[0])
 
   await page.getByRole('button', { name: 'New link, for another person' }).click()
-  await expect(input).not.toHaveValue(firstLink, { timeout: NETWORK_TIMEOUT })
-  const link = await input.inputValue()
+  // Two async steps happen after this click: the value briefly becomes the
+  // "Generating…" placeholder, then settles to the real new link. Waiting
+  // only for "not equal to firstLink" can catch that placeholder in the
+  // middle — "Generating…" already satisfies "not firstLink" — and read it
+  // before the real link lands. Poll and re-read together so `link` can
+  // only ever end up holding a value that passed both checks in the same
+  // instant, not survive a race where its check passed but the value moved
+  // on again before we came back to look at it.
+  let link = ''
+  await expect(async () => {
+    link = await input.inputValue()
+    expect(link).not.toBe(firstLink)
+    expect(link).not.toBe('Generating…')
+  }).toPass({ timeout: NETWORK_TIMEOUT })
   manifest.trackJoinAccess(link.split('#/join/')[1].split('/')[0])
 
   await page.getByRole('button', { name: 'Close' }).click()

@@ -155,8 +155,27 @@ export async function getJoinLink(page: Page): Promise<string> {
 export async function sendInviteByKey(page: Page, publicKeyBlob: string): Promise<void> {
   await page.getByRole('button', { name: 'Invite ▾' }).click()
   await page.getByRole('button', { name: 'By public key' }).click()
-  await page.getByPlaceholder('Paste their public key').fill(publicKeyBlob)
-  await page.getByRole('button', { name: 'Send invite' }).click()
+  const input = page.getByPlaceholder('Paste their public key')
+  await input.fill(publicKeyBlob)
+  const sendButton = page.getByRole('button', { name: 'Send invite' })
+
+  // SessionView.vue's sendInviteByKey() silently no-ops — no error, no log
+  // entry, nothing — if the pasted value is empty or its own ownPrivateKey/
+  // sessionKeyJwk state is unset. That's indistinguishable from a hung
+  // network call by symptom alone (both just sit there), which is exactly
+  // what made this fail three times with no other clue why. Rule out "the
+  // paste didn't take" or "the button was disabled" before clicking, so a
+  // failure past this point can only be the app's own internal state.
+  const actualValue = await input.inputValue()
+  const isDisabled = await sendButton.isDisabled()
+  if (actualValue !== publicKeyBlob || isDisabled) {
+    throw new Error(
+      `sendInviteByKey: precondition failed before clicking Send invite — ` +
+        `input value ${actualValue === publicKeyBlob ? 'matches' : `MISMATCH (${actualValue.length} chars pasted, ${publicKeyBlob.length} expected)`}, ` +
+        `button disabled=${isDisabled}`,
+    )
+  }
+  await sendButton.click()
 
   // Wait for whichever of the two outcomes the app actually renders, rather
   // than only waiting for success and letting a real app-side error (shown

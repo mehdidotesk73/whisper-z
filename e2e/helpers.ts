@@ -182,7 +182,32 @@ export async function sendInviteByKey(page: Page, publicKeyBlob: string): Promis
   // in `.modal-box .error`) surface as an opaque timeout with no diagnosis.
   const sentText = page.getByText('Invite sent to')
   const errorText = page.locator('.modal-box .error')
-  await expect(sentText.or(errorText)).toBeVisible({ timeout: NETWORK_TIMEOUT })
+  try {
+    await expect(sentText.or(errorText)).toBeVisible({ timeout: NETWORK_TIMEOUT })
+  } catch (waitErr) {
+    // Neither outcome rendered even though the click was valid (checked
+    // above) — dump the modal's actual live state into the error itself
+    // rather than relying on a separate downloadable artifact, since this
+    // sandbox's own network can't reach GitHub's artifact storage to fetch
+    // one anyway (same egress policy that blocks Supabase directly). If the
+    // button still reads "Sending…", invitingByKey is stuck true and the
+    // app is genuinely hung mid-await; if it's back to "Send invite", the
+    // function returned (or completed) without setting lastInviteId or
+    // inviteByKeyError at all.
+    const buttonText = await sendButton.textContent().catch(() => '(button not found)')
+    const inputValueNow = await input.inputValue().catch(() => '(input not found)')
+    const modalText = await page
+      .locator('.modal-box')
+      .innerText()
+      .catch(() => '(modal-box not found — may have closed)')
+    throw new Error(
+      `sendInviteByKey: neither "Invite sent to" nor an error rendered within ${NETWORK_TIMEOUT}ms.\n` +
+        `Send button text now: "${buttonText}"\n` +
+        `Input value now: "${inputValueNow}"\n` +
+        `Full modal text now: "${modalText}"\n` +
+        `Original wait error: ${waitErr}`,
+    )
+  }
   if (await errorText.isVisible()) {
     const uiError = await errorText.textContent()
     const debugErrors = await getDebugErrors(page)

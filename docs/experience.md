@@ -138,6 +138,59 @@ identify a P-256 key — used at every identity-string call site. Verified with 
 the exact field-order mismatch before touching the app, then a 3-participant simulation after the
 fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their key material.
 
+### Deriving an ECDSA Keypair From a Raw Scalar
+
+Stage E's admin/capability design (`docs/system-design.md` §3) calls for every identity to get a
+personal signing keypair *derived* from its existing ECDH private key — not generated independently,
+so a personal/account/guest link never needs to carry a second key. The private half is easy: hash
+the ECDH private scalar with a purpose string, reduce mod the curve order, done. The public half is
+the actual problem: WebCrypto has no "compute a public key from a raw scalar" operation. It only
+generates a fresh random keypair, or imports one where the public point is already known (and gets
+checked for consistency with the private scalar on import).
+
+The fix exploits an OPTIONAL field: PKCS8's `ECPrivateKey` structure (RFC 5915) has a `[1] publicKey`
+field that isn't required. Hand-build a minimal DER PKCS8 envelope carrying only the private scalar,
+with that field omitted, and `importKey('pkcs8', ...)` derives and attaches the matching public key
+itself — no elliptic-curve math written by hand, no new dependency. Verified with a standalone script
+before writing any app code, and — critically — against **real Chromium**, not just Node's OpenSSL-
+backed WebCrypto: import succeeds, the key signs, and the exported public half correctly verifies
+that signature.
+
+**The one thing this doesn't close: it's unconfirmed on Safari/WebKit**, this app's actual mobile
+target, and this sandbox has no way to test that (no network to fetch a WebKit browser, no device).
+Different engines can legitimately differ here — the omitted-public-key behavior is a convenience the
+spec allows, not one it mandates. Two options were on the table: rely on this native trick and ask for
+a real-device check once deployed, or add a small audited EC library (e.g. `@noble/curves`) used
+narrowly for just this one operation. Chose the native trick, since it's zero new dependencies and
+matches the design as written — but this is a genuine open risk, not a settled fact, until confirmed
+on an actual iPhone.
+
+### Signing Is Opportunistic, Not Yet Enforced
+
+Stage E signs every new session_log message with the sender's derived personal signing key, and
+`SessionView.vue` verifies incoming ones against the signer's signing key (published in their
+`session_participants` row). But this app already has real deployed data — existing sessions, real
+message history, real `session_participants` rows written before any of this existed. Retroactively
+requiring a signature would have silently deleted a user's own message history the moment this
+shipped (no signature exists to check, no signing key was ever published for the sender).
+
+So the rollout is deliberately soft: a message with no `kind`/`signature` at all (the shape every
+message had before this feature) is still rendered and trusted, exactly as it always was — nothing
+here retroactively distrusts history it can't verify. A new-shape message whose signature fails to
+verify against its claimed sender's *known* signing key is dropped (the actual forgery case this
+closes). A sender with no known signing key yet — a legacy participant row, or a race with someone
+who only just joined — renders unverified rather than being dropped.
+
+**The gap this leaves:** during the transition, a participant holding the shared session key can
+still forge another's `sender` by simply omitting `kind`/`signature` and falling back to the old,
+unsigned shape — the session itself has no way to force every client to use the new one. Closing this
+for real needs either a flag day (reject any message missing a valid signature once enough time has
+passed that no legitimate unsigned traffic remains) or an explicit per-session "signing required"
+flag set once every participant is known to be on a client that signs. Neither is built yet; this is
+an honestly-labeled best-effort improvement, not a hard guarantee — same spirit as this project's
+other documented gaps (see `docs/TODO.md`'s Code section: no forward secrecy, no out-of-band key
+verification).
+
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)

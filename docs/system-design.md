@@ -483,9 +483,24 @@ considered and rejected: it trades one indexed existence check for an occasional
 start of a session's history, but a real check is cheap enough here that there's no reason to accept
 the imprecision.
 
-**Stage E: the admin/capability layer (design finalized, not yet built).** Worked out over several
+**Stage E: the admin/capability layer (in progress, built in slices).** Worked out over several
 rounds of design review, including two rejected alternatives verified with standalone scripts before
-being ruled out (see "Two rejected designs" below) — recorded here in full before any of it is coded.
+being ruled out (see "Two rejected designs" below) — recorded here in full before any of it was coded.
+
+**Slice 1, shipped:** the admin ECDH + signing keypair (generated at session creation, forwarded
+through `SessionAccessPayload`/`JoinPayload`), every identity's derived personal signing keypair,
+`session_participants`' payload gaining a `signingPublicKey`, and every new `session_log` message
+being signed and verified — see "Signing Is Opportunistic, Not Yet Enforced" and "Deriving an ECDSA
+Keypair From a Raw Scalar" in `docs/experience.md` for the transition-safety tradeoff and the one
+open cross-browser risk this leaves. `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) was
+also changed to take the guest's whole decrypted payload rather than a narrow parameter list, so a
+migrating guest identity's admin keys (and, later, a title) ride along instead of being silently
+dropped — a real gap the original narrower signature had.
+
+**Not yet built:** capability derivation (`deriveCapability`), the capability-grant flow (two-layer
+seal, self-write-on-receipt), gating invite-minting on holding the invite capability, and signing
+invites themselves. The rest of this entry describes the full target design; only the slice above is
+live in the app today.
 
 *Two keypairs per session, both freshly generated at creation, neither derived from anything:*
 - `adminEcdhKeyPair` — its private half is what capabilities are derived from.

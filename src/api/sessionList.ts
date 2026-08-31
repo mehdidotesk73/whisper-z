@@ -4,6 +4,7 @@
 import { deriveLookupTag, openSealed, importSessionKey, decryptText } from '../lib/crypto'
 import { fetchSessionAccessForOwner, fetchParticipants, fetchLatestMessageTimes, toEnvelope } from './sessions'
 import { fetchAccountsByPublicKeys } from './accounts'
+import { parseParticipantPayload } from './sessionActions'
 import { guestNameForKey } from '../lib/guestName'
 import type { SessionAccessPayload } from '../lib/sessionTypes'
 import type { CurrentAccount } from '../lib/auth'
@@ -35,9 +36,10 @@ export async function fetchSessionList(account: CurrentAccount): Promise<Session
       // plaintext public key it names.
       const sessionKey = await importSessionKey(payload.sessionKey)
       const participantRows = await fetchParticipants(payload.sessionId)
-      const publicKeys = await Promise.all(
+      const decrypted = await Promise.all(
         participantRows.map((p) => decryptText(sessionKey, { ciphertext: p.ciphertext, iv: p.iv })),
       )
+      const publicKeys = decrypted.map((d) => parseParticipantPayload(d).publicKeyId)
       const others = publicKeys.filter((publicKey) => !myIds.has(publicKey))
 
       const linkedAccounts = await fetchAccountsByPublicKeys(others)

@@ -22,6 +22,8 @@ import {
   packJwk,
   unpackJwk,
   canonicalPublicKeyId,
+  generateAdminSigningKeyPair,
+  derivePersonalSigningKeyPair,
 } from '../lib/crypto'
 import {
   createSession,
@@ -34,8 +36,39 @@ import {
   type SessionAccessRow,
 } from './sessions'
 import { extractPackedKey } from '../lib/route'
-import type { SessionAccessPayload, JoinPayload } from '../lib/sessionTypes'
+import type { SessionAccessPayload, JoinPayload, ParticipantPayload } from '../lib/sessionTypes'
 import type { CurrentAccount } from '../lib/auth'
+
+/**
+ * A session_participants row decrypts to a bare public-key-id string if it
+ * predates Stage E, or a ParticipantPayload JSON object if it doesn't — see
+ * lib/sessionTypes.ts's ParticipantPayload doc comment. Every reader of a
+ * participant row goes through this rather than assuming either shape.
+ */
+export function parseParticipantPayload(decrypted: string): Partial<ParticipantPayload> & { publicKeyId: string } {
+  try {
+    const parsed = JSON.parse(decrypted)
+    if (parsed && typeof parsed === 'object' && typeof parsed.publicKeyId === 'string') return parsed
+  } catch {
+    // Not JSON — a legacy row whose whole decrypted value IS the bare public key.
+  }
+  return { publicKeyId: decrypted }
+}
+
+/** Encrypts and inserts a session_participants row for `identity`, publishing its personal signing public key alongside its public-key id (see ParticipantPayload). Used by every join path below. */
+async function addParticipantForIdentity(
+  sessionId: string,
+  sessionKey: CryptoKey,
+  privateKey: CryptoKey,
+  publicKey: CryptoKey,
+): Promise<void> {
+  const publicKeyId = canonicalPublicKeyId(await exportPublicKey(publicKey))
+  const signingKey = await derivePersonalSigningKeyPair(privateKey)
+  const signingPublicKey = publicJwkFromPrivateJwk(await exportPrivateKey(signingKey))
+  const payload: ParticipantPayload = { publicKeyId, signingPublicKey }
+  const entry = await encryptText(sessionKey, JSON.stringify(payload))
+  await addParticipant(sessionId, entry.ciphertext, entry.iv)
+}
 
 /**
  * Finds the one session_access row (if any) an account already holds for a
@@ -93,8 +126,8 @@ async function hasParticipant(sessionId: string, sessionKey: CryptoKey, publicKe
   const rows = await fetchParticipants(sessionId)
   for (const row of rows) {
     try {
-      const key = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
-      if (key === publicKeyId) return true
+      const decrypted = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
+      if (parseParticipantPayload(decrypted).publicKeyId === publicKeyId) return true
     } catch {
       // Not decryptable with this session's key — shouldn't happen, ignore.
     }
@@ -128,16 +161,31 @@ export async function startNewSession(account: CurrentAccount | null, title?: st
   const sessionKey = await generateSessionKey()
   const sessionKeyJwk = await exportSessionKey(sessionKey)
 
-  const payload: SessionAccessPayload = { sessionId, sessionKey: sessionKeyJwk, role: 'owner', title }
+  // Two keypairs generated fresh here, tied to this session and nothing
+  // else — neither derived from the creator's own identity. See
+  // docs/system-design.md §3's "Stage E" entry for why that separation
+  // matters (blast radius: compromising a session's admin material must
+  // never threaten the creator's real account).
+  const adminEcdhKeyPair = await generateKeyPair()
+  const adminSigningKeyPair = await generateAdminSigningKeyPair()
+
+  const payload: SessionAccessPayload = {
+    sessionId,
+    sessionKey: sessionKeyJwk,
+    role: 'owner',
+    title,
+    adminEcdhPublicKey: await exportPublicKey(adminEcdhKeyPair.publicKey),
+    adminSigningPublicKey: await exportPublicKey(adminSigningKeyPair.publicKey),
+    adminEcdhPrivateKey: await exportPrivateKey(adminEcdhKeyPair.privateKey),
+    adminSigningPrivateKey: await exportPrivateKey(adminSigningKeyPair.privateKey),
+  }
   const sealed = await sealForRecipient(payload, identity.publicKey)
   const ownerTag = await deriveLookupTag(identity.privateKey, 'session-access')
 
   const ok = await insertSessionAccess(ownerTag, sealed)
   if (!ok) return null
 
-  const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
-  const participantEntry = await encryptText(sessionKey, publicKeyId)
-  await addParticipant(sessionId, participantEntry.ciphertext, participantEntry.iv)
+  await addParticipantForIdentity(sessionId, sessionKey, identity.privateKey, identity.publicKey)
 
   const packedKey = account ? null : packJwk(await exportPrivateKey(identity.privateKey))
   return { sessionId, packedKey }
@@ -157,6 +205,10 @@ export async function joinExistingSession(
     sessionId: joinPayload.sessionId,
     sessionKey: joinPayload.sessionKey,
     role: 'member',
+    // Forwarded, not generated — a member never holds admin key material,
+    // only the public halves needed to verify admin-signed entries.
+    adminEcdhPublicKey: joinPayload.adminEcdhPublicKey,
+    adminSigningPublicKey: joinPayload.adminSigningPublicKey,
   }
   const sealed = await sealForRecipient(payload, identity.publicKey)
   const ownerTag = await deriveLookupTag(identity.privateKey, 'session-access')
@@ -165,9 +217,7 @@ export async function joinExistingSession(
   if (!ok) return null
 
   const sessionKey = await importSessionKey(joinPayload.sessionKey)
-  const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
-  const participantEntry = await encryptText(sessionKey, publicKeyId)
-  await addParticipant(joinPayload.sessionId, participantEntry.ciphertext, participantEntry.iv)
+  await addParticipantForIdentity(joinPayload.sessionId, sessionKey, identity.privateKey, identity.publicKey)
 
   const packedKey = account ? null : packJwk(await exportPrivateKey(identity.privateKey))
   return { sessionId: joinPayload.sessionId, packedKey }
@@ -193,32 +243,43 @@ export async function joinExistingSession(
  * (skipped when the account already joined this session directly).
  * Idempotent per guest identity — migrating the same guest key twice is a
  * no-op past the first merge.
+ *
+ * Takes the guest's whole decrypted payload, not just sessionId/sessionKey/
+ * role, so anything else it carries — Stage E's admin key fields, a future
+ * title — rides along into the account's row too rather than being silently
+ * dropped by this call's own parameter list (a real bug an earlier,
+ * narrower signature had: a guest identity that happened to be a session's
+ * admin, or held a title, would have lost both on migration).
  */
 export async function migrateGuestSessionToAccount(
-  sessionId: string,
-  sessionKeyJwk: JsonWebKey,
-  role: 'owner' | 'member',
+  guestPayload: SessionAccessPayload,
   guestPublicKeyId: string,
   account: CurrentAccount,
 ): Promise<boolean> {
+  const { sessionId, sessionKey: sessionKeyJwk } = guestPayload
   const existing = await findAccessRow(account, sessionId)
 
   if (existing) {
     const identityPublicKeyIds = new Set(existing.payload.identityPublicKeyIds ?? [])
     if (!identityPublicKeyIds.has(guestPublicKeyId)) {
       identityPublicKeyIds.add(guestPublicKeyId)
-      const payload: SessionAccessPayload = { ...existing.payload, identityPublicKeyIds: [...identityPublicKeyIds] }
+      const payload: SessionAccessPayload = {
+        ...existing.payload,
+        identityPublicKeyIds: [...identityPublicKeyIds],
+        // A session has exactly one admin; this only fills a gap if the
+        // account's own existing row somehow lacks these while the guest
+        // identity being merged in has them (defensive, not the normal case).
+        adminEcdhPublicKey: existing.payload.adminEcdhPublicKey ?? guestPayload.adminEcdhPublicKey,
+        adminSigningPublicKey: existing.payload.adminSigningPublicKey ?? guestPayload.adminSigningPublicKey,
+        adminEcdhPrivateKey: existing.payload.adminEcdhPrivateKey ?? guestPayload.adminEcdhPrivateKey,
+        adminSigningPrivateKey: existing.payload.adminSigningPrivateKey ?? guestPayload.adminSigningPrivateKey,
+      }
       const sealed = await sealForRecipient(payload, account.publicKey)
       const ok = await updateSessionAccess(existing.row.id, sealed)
       if (!ok) return false
     }
   } else {
-    const payload: SessionAccessPayload = {
-      sessionId,
-      sessionKey: sessionKeyJwk,
-      role,
-      identityPublicKeyIds: [guestPublicKeyId],
-    }
+    const payload: SessionAccessPayload = { ...guestPayload, identityPublicKeyIds: [guestPublicKeyId] }
     const sealed = await sealForRecipient(payload, account.publicKey)
     const ownerTag = await deriveLookupTag(account.privateKey, 'session-access')
     const ok = await insertSessionAccess(ownerTag, sealed)
@@ -227,8 +288,7 @@ export async function migrateGuestSessionToAccount(
 
   const sessionKey = await importSessionKey(sessionKeyJwk)
   if (!(await hasParticipant(sessionId, sessionKey, account.publicKeyId))) {
-    const participantEntry = await encryptText(sessionKey, account.publicKeyId)
-    await addParticipant(sessionId, participantEntry.ciphertext, participantEntry.iv)
+    await addParticipantForIdentity(sessionId, sessionKey, account.privateKey, account.publicKey)
   }
   return true
 }
@@ -253,5 +313,5 @@ export async function adoptGuestIdentity(pasted: string, account: CurrentAccount
   if (!rows.length) return false
 
   const payload = await openSealed<SessionAccessPayload>(toEnvelope(rows[0]), guestPrivateKey)
-  return migrateGuestSessionToAccount(payload.sessionId, payload.sessionKey, payload.role, guestPublicKeyId, account)
+  return migrateGuestSessionToAccount(payload, guestPublicKeyId, account)
 }

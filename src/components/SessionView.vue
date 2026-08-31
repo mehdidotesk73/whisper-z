@@ -13,6 +13,10 @@ import {
   importJoinKey,
   bytesToUrlSafe,
   unpackJwk,
+  derivePersonalSigningKeyPair,
+  importEcdsaPublicKey,
+  signData,
+  verifySignature,
 } from '../lib/crypto'
 import {
   fetchSessionAccessForOwner,
@@ -24,13 +28,16 @@ import {
   createJoinAccess,
   unsubscribe,
   toEnvelope,
+  fetchParticipants,
+  subscribeParticipants,
+  type ParticipantRow,
 } from '../api/sessions'
 import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
-import { isIdentityMerged, migrateGuestSessionToAccount } from '../api/sessionActions'
+import { isIdentityMerged, migrateGuestSessionToAccount, parseParticipantPayload } from '../api/sessionActions'
 import { createSessionInvite, rejectInvite } from '../api/inviteActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
@@ -80,7 +87,41 @@ let ownPrivateKey: CryptoKey | null = null
 // The identity used to SEND: a guest's one-off key, or an account's real
 // key (always — even for a migrated session, see onMounted below).
 let ownPublicKeyId = ''
-let ownRole: 'owner' | 'member' = 'member'
+// The whole opened SessionAccessPayload for this route's identity — kept
+// around (not just the few fields destructured above) so migrateToAccount
+// and the invite builders below can forward Stage E's admin key fields
+// without re-fetching/re-opening anything. See sessionActions.ts's
+// migrateGuestSessionToAccount doc comment for why passing the whole
+// payload, not a narrower parameter list, matters.
+let ownAccessPayload: SessionAccessPayload | null = null
+// A message sent from here on is signed with the sender's own personal
+// signing key (derived, not stored — see lib/crypto.ts) and verified against
+// the sender's signingPublicKey published in their session_participants
+// row. Populated from the initial participant fetch below and kept live via
+// subscribeParticipants; a sender with no entry here yet (a legacy
+// participant row, or a race with a very recently joined sender) is
+// rendered unverified rather than dropped — see "Signing Is Opportunistic,
+// Not Yet Enforced" in docs/experience.md for the honest limit that leaves.
+const participantSigningKeys = new Map<string, CryptoKey>()
+let participantChannel: RealtimeChannel | null = null
+
+async function registerParticipantRow(row: Pick<ParticipantRow, 'ciphertext' | 'iv'>) {
+  if (!sessionKey) return
+  try {
+    const decrypted = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
+    const parsed = parseParticipantPayload(decrypted)
+    if (parsed.signingPublicKey) {
+      participantSigningKeys.set(parsed.publicKeyId, await importEcdsaPublicKey(parsed.signingPublicKey))
+    }
+  } catch {
+    // Not decryptable with this session's key — shouldn't happen, ignore.
+  }
+}
+
+/** Same field order at sign time and verify time — see signOutgoingMessage/decodeMessage below. */
+function messageSigningInput(sender: string, text: string, createdAt: string): string {
+  return JSON.stringify({ kind: 'message', sender, text, createdAt })
+}
 // Which sender keys count as "mine" for bubble styling — usually just
 // ownPublicKeyId, but a migrated session's account also privately
 // recognizes its old, pinned guest key as its own (see identityPublicKeyId
@@ -126,6 +167,27 @@ async function decodeMessage(row: { id: string; ciphertext: string; iv: string }
   try {
     const json = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
     const plain = JSON.parse(json) as DecodedMessage
+
+    // A legacy message (sent before Stage E) has no kind/signature at all —
+    // still trusted, exactly as it always was; nothing here retroactively
+    // distrusts history it can't verify. A new-shape message with a
+    // signature that fails to verify against its claimed sender's known
+    // signing key IS dropped — that's the actual forgery case this closes.
+    // A sender with no known signing key yet (legacy participant row, or a
+    // race with a just-joined sender) renders unverified rather than being
+    // dropped — see participantSigningKeys' doc comment above.
+    if (plain.kind === 'message' && plain.signature) {
+      const signingKey = participantSigningKeys.get(plain.sender)
+      if (signingKey) {
+        const input = messageSigningInput(plain.sender, plain.text, plain.createdAt)
+        const valid = await verifySignature(signingKey, plain.signature, input)
+        if (!valid) {
+          logDebug(`Dropped message ${row.id}: signature did not verify for sender ${plain.sender}`, 'warn')
+          return null
+        }
+      }
+    }
+
     resolveName(plain.sender)
     return { id: row.id, mine: myKeys.has(plain.sender), sender: plain.sender, text: plain.text }
   } catch (err) {
@@ -224,7 +286,14 @@ onMounted(async () => {
     activeSessionId = access.sessionId
     sessionKeyJwk = access.sessionKey
     sessionKey = await importSessionKey(access.sessionKey)
-    ownRole = access.role
+    ownAccessPayload = access
+
+    // Populate participantSigningKeys before loading any messages below, so
+    // the very first render can verify signatures rather than treating
+    // everyone as "no known key yet."
+    for (const row of await fetchParticipants(activeSessionId)) await registerParticipantRow(row)
+    participantChannel = subscribeParticipants(activeSessionId, registerParticipantRow)
+
     if (props.sessionId) {
       // Always send as the account's real key, even for a migrated session
       // — that's what lets new messages resolve to the account's live
@@ -257,15 +326,19 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (messageChannel) unsubscribe(messageChannel)
+  if (participantChannel) unsubscribe(participantChannel)
 })
 
 async function send() {
   const text = draft.value.trim()
-  if (!text || !sessionKey || sending.value) return
+  if (!text || !sessionKey || !ownPrivateKey || sending.value) return
 
   sending.value = true
   try {
-    const payload: DecodedMessage = { sender: ownPublicKeyId, text, createdAt: new Date().toISOString() }
+    const createdAt = new Date().toISOString()
+    const signingKey = await derivePersonalSigningKeyPair(ownPrivateKey)
+    const signature = await signData(signingKey, messageSigningInput(ownPublicKeyId, text, createdAt))
+    const payload: DecodedMessage = { kind: 'message', sender: ownPublicKeyId, text, createdAt, signature }
     const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(payload))
     const ok = await sendMessage(activeSessionId, ciphertext, iv)
     if (ok) {
@@ -307,7 +380,12 @@ async function generateInvite() {
   try {
     const secretBytes = generateJoinSecret()
     const joinKey = await importJoinKey(secretBytes)
-    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+    const payload: JoinPayload = {
+      sessionId: activeSessionId,
+      sessionKey: sessionKeyJwk,
+      adminEcdhPublicKey: ownAccessPayload?.adminEcdhPublicKey,
+      adminSigningPublicKey: ownAccessPayload?.adminSigningPublicKey,
+    }
     const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
     const joinId = await createJoinAccess({ ciphertext, iv })
     if (!joinId) return
@@ -345,7 +423,12 @@ async function sendInviteByKey() {
   inviteByKeyError.value = ''
   try {
     const targetPublicKeyJwk = unpackJwk(pasted)
-    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+    const payload: JoinPayload = {
+      sessionId: activeSessionId,
+      sessionKey: sessionKeyJwk,
+      adminEcdhPublicKey: ownAccessPayload?.adminEcdhPublicKey,
+      adminSigningPublicKey: ownAccessPayload?.adminSigningPublicKey,
+    }
     const created = await createSessionInvite(payload, ownPrivateKey, targetPublicKeyJwk)
     if (!created) {
       inviteByKeyError.value = 'Could not send the invite — try again.'
@@ -419,17 +502,11 @@ function toggleMigrate() {
 }
 
 async function migrateToAccount() {
-  if (!currentAccount.value || !sessionKeyJwk) return
+  if (!currentAccount.value || !ownAccessPayload) return
   migrating.value = true
   migrateError.value = ''
   try {
-    const ok = await migrateGuestSessionToAccount(
-      activeSessionId,
-      sessionKeyJwk,
-      ownRole,
-      ownPublicKeyId,
-      currentAccount.value,
-    )
+    const ok = await migrateGuestSessionToAccount(ownAccessPayload, ownPublicKeyId, currentAccount.value)
     if (!ok) {
       migrateError.value = 'Could not add this session to your account — try again.'
       return

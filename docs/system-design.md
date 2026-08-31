@@ -453,6 +453,27 @@ address it — the only real mitigation is the user's own choice to connect thro
 changes what IP the server sees in the first place. Incognito/private browsing mode does not help
 here: it only affects local browser storage, not what the server observes over the network.
 
+**A second, stronger version of that same leak needs no IP correlation at all: live realtime
+subscriptions *are* the membership graph, in real time.** The paragraph above describes what an
+operator can reconstruct from request *patterns* over time. But `subscribeMessages` and
+`subscribeParticipants` (`src/api/sessions.ts`) open a channel whose topic and `postgres_changes`
+filter embed the plaintext `session_id` directly (`session-log-${sessionId}`, filter
+`session_id=eq.${sessionId}`) — so for as long as two people have the same session open, Supabase's
+Realtime service has both of their live connections registered as members of that identical channel,
+at that exact moment, with no decryption, no username, and no coincidental IP-to-identity linkage
+required. This is qualitatively stronger than the traffic-analysis problem above: not "these two IPs
+probably touched the same tag at some point," but "these two specific open connections are both
+subscribed to session S, right now" — a direct, live edge in the exact graph `owner_tag` and the
+encrypted `session_participants` rows work to keep hidden at rest. There is no mitigation for this in
+the current architecture, and it isn't a gap this schema's design failed to close — any system that
+routes real-time delivery to exactly the right recipients requires the router to know, live, who's
+subscribed to what. See "Peer-relay cover traffic to hide the session graph — rejected" in
+`docs/experience.md` for why routing this through other end users instead doesn't remove the leak,
+just relocates it, while adding a Sybil-attack surface this app has no way to close (anyone —
+including the operator — can create unlimited free accounts and volunteer as "relays"). Treat this as
+an accepted, structural limitation of real-time delivery on a single managed backend, not a bug to
+keep chasing.
+
 **What the server can and can't see:** ciphertext is opaque, exactly as before. What's new here is
 that the *membership graph itself* — which sessions a given identity/account touches — is opaque
 too, not just message content. Metadata that remains visible: that a session exists, roughly when

@@ -38,6 +38,27 @@ The CI workflow runs `npm ci`, which fails outright ("can only install packages 
 
 Emitting declarations for an *app* makes `vue-tsc` demand exported names for every type used in a component's public surface — a `defineProps` interface that isn't exported fails with `TS4082: Default export of the module has or is using private name 'Props'`. Declarations matter for libraries, not apps. Dropping `declaration`/`declarationMap` is the fix, not exporting every internal interface.
 
+### A Component-Wide Outside-Click Listener Can Close a Modal It Doesn't Contain
+
+`SessionView.vue` wraps its top-bar buttons and two inline panels (Warning, Migrate) in a
+`<div ref="panelArea">`, with `useOutsideClick(panelArea, closeAllPanels)` closing everything when a
+click lands outside it. The Invite-by-link, Invite-by-key, and Aliases panels are `<Modal>`
+components rendered as *siblings after* `panelArea` closes in the template — not inside it. Since
+`useOutsideClick` checks `!panelArea.contains(event.target)`, a click *anywhere inside one of those
+open modals* — the input, a button, the text — registers as "outside `panelArea`" and closes the
+modal instantly, before the tap could ever reach what it was aimed at. `Modal.vue`'s own backdrop
+click (`@click.self`) already closes it correctly on its own; the bug was a second, wider listener
+stepping on it. Found through a combination that took real effort to connect: an E2E test kept
+timing out on "Invite by key" with no error and an empty debug log (nothing ever threw, because
+nothing ever got the chance to run), and the user's own manual test named the actual symptom outright
+— tapping anywhere in the modal, including the input, closed it immediately. Fixed by splitting
+`closeAllPanels` into that (still used when opening one panel closes the others) and a narrower
+`closeInlinePanels` (just Warning/Migrate) for the outside-click listener specifically — the three
+Modal-backed panels don't need a second, competing close mechanism at all. General lesson: an
+outside-click listener's "root" must actually contain everything that should count as "inside," and a
+`<Modal>` rendered as a template sibling — however visually nested — is not automatically inside
+anything else's DOM subtree.
+
 ### Ambient Types for Build-Time Constants
 
 `__BUILD_ID__` and `__BUILD_TIME__` are injected by Vite's `define`, and `virtual:pwa-register` only exists at build time. TypeScript knows about none of them without an `src/env.d.ts` declaring the constants and referencing `vite/client` and `vite-plugin-pwa/client`. Without it the build fails with `TS2304: Cannot find name '__BUILD_ID__'`.
@@ -120,6 +141,32 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)
+
+### v0.11.0 — 2026-08-31 (multi-actor E2E scenarios + a real modal bug fix)
+- **Added:** five more Playwright scenarios against the live Supabase project — account creation +
+  re-login via its own link, a guest joining via a join link, a second account joining via a
+  public-key invite, and both directions of guest-to-account adoption — plus `e2e/helpers.ts` for the
+  shared UI actions they all reuse. `e2e/fixtures.ts`'s `manifest` fixture now also cleans up matching
+  `accounts` rows, `join_access` rows, and `session_invites` rows, none of which the original single
+  scenario needed to touch
+- **Found and fixed a real app bug, not a test bug:** see "A Component-Wide Outside-Click Listener Can
+  Close a Modal It Doesn't Contain" above — tapping anywhere inside the Invite-by-link, Invite-by-key,
+  or Aliases modal in `SessionView.vue` closed it instantly, before the tap could reach what it was
+  aimed at. Surfaced by the new `second-account-via-invite` E2E scenario timing out with no error and
+  an empty on-screen debug log across many CI cycles, then confirmed and precisely named through the
+  user's own manual test
+- **Debug tooling added along the way, worth keeping:** `getDebugLogText`/`getDebugErrors` in
+  `e2e/helpers.ts` read the app's own on-screen debug log (`src/debug.ts`) directly from a Playwright
+  test — the real exception detail a catch block's static UI text doesn't show. A general `afterEach`
+  in `e2e/fixtures.ts` now attaches that log to any failed test's results automatically.
+  `.github/workflows/ci.yml` uploads `test-results/` as an artifact on failure — discovered mid-debug
+  that this hadn't existed before, so a failure's trace/accessibility-snapshot was never actually
+  retrievable
+- **A downloadable CI artifact isn't always reachable from here.** GitHub Actions artifacts live on
+  Azure Blob Storage, which this sandbox's egress policy blocks — same restriction as the direct
+  Supabase block already documented elsewhere. When that happens, get the same information a different
+  way: the failing helper now dumps the relevant DOM state directly into its thrown error message,
+  which reaches the job log without needing a separate download
 
 ### v0.10.0 — 2026-08-30 (Vitest test suite)
 - **Added:** `npm test` (Vitest) covering `src/lib/`'s pure logic and the non-Supabase-dependent

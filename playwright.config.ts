@@ -14,6 +14,12 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
+  // The default 30s per-test budget is tight for a multi-actor scenario —
+  // several accounts, a session, an invite, multiple message round trips —
+  // once each individual wait is itself given room for live-network latency
+  // (see NETWORK_TIMEOUT in e2e/helpers.ts). This is a ceiling, not a target:
+  // a passing test still finishes in a few seconds most of the time.
+  timeout: 60000,
   reporter: 'list',
   use: {
     baseURL: 'http://localhost:5173',

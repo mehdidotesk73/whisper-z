@@ -32,9 +32,7 @@ test('a guest merges itself into an account and sender names resolve correctly o
   manifest.track(account1Link)
   await startSessionAsAccount(page)
 
-  const joinLink = await getJoinLink(page)
-  const joinId = joinLink.split('#/join/')[1].split('/')[0]
-  manifest.trackJoinAccess(joinId)
+  const joinLink = await getJoinLink(page, manifest)
 
   const guestContext = await browser.newContext()
   const guestPage = await guestContext.newPage()

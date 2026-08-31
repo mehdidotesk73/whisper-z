@@ -148,22 +148,42 @@ the actual problem: WebCrypto has no "compute a public key from a raw scalar" op
 generates a fresh random keypair, or imports one where the public point is already known (and gets
 checked for consistency with the private scalar on import).
 
-The fix exploits an OPTIONAL field: PKCS8's `ECPrivateKey` structure (RFC 5915) has a `[1] publicKey`
-field that isn't required. Hand-build a minimal DER PKCS8 envelope carrying only the private scalar,
-with that field omitted, and `importKey('pkcs8', ...)` derives and attaches the matching public key
-itself — no elliptic-curve math written by hand, no new dependency. Verified with a standalone script
-before writing any app code, and — critically — against **real Chromium**, not just Node's OpenSSL-
-backed WebCrypto: import succeeds, the key signs, and the exported public half correctly verifies
-that signature.
+**First attempt, since abandoned:** exploit an OPTIONAL field in PKCS8's `ECPrivateKey` structure
+(RFC 5915) — `[1] publicKey` isn't required. Hand-build a minimal DER PKCS8 envelope carrying only
+the private scalar, with that field omitted, and `importKey('pkcs8', ...)` derives and attaches the
+matching public key itself — no elliptic-curve math written by hand, no new dependency. Verified with
+a standalone script against real Chromium before writing any app code: import succeeded, the key
+signed, the exported public half correctly verified that signature. Documented at the time as a real,
+unconfirmed risk on Safari/WebKit specifically, since this sandbox has no way to test an actual iPhone
+— "different engines can legitimately differ here, the omitted-public-key behavior is a convenience
+the spec allows, not one it mandates."
 
-**The one thing this doesn't close: it's unconfirmed on Safari/WebKit**, this app's actual mobile
-target, and this sandbox has no way to test that (no network to fetch a WebKit browser, no device).
-Different engines can legitimately differ here — the omitted-public-key behavior is a convenience the
-spec allows, not one it mandates. Two options were on the table: rely on this native trick and ask for
-a real-device check once deployed, or add a small audited EC library (e.g. `@noble/curves`) used
-narrowly for just this one operation. Chose the native trick, since it's zero new dependencies and
-matches the design as written — but this is a genuine open risk, not a settled fact, until confirmed
-on an actual iPhone.
+**That risk was confirmed the first time this ran on the user's own iPhone.** Starting a session threw
+`DataError: Data provided to an operation does not meet requirements` — the message is not generic;
+it's the literal string WebKit (and Firefox) throw for exactly this case, independently documented in
+`@noble/curves`' own source (its `webcrypto.js` wrapper, in a comment on its own "raw" private-key
+import path): *"Chrome, node, bun, deno: works. Safari, Firefox: Data provided to an operation does
+not meet requirements."* Chromium's tolerance of the missing public-key field was the exception, not
+the rule — exactly the possibility flagged, now settled as fact rather than an open risk.
+
+**The fix: compute the public point in pure JS instead of asking WebCrypto to infer it.**
+`@noble/curves/nist.js`'s `p256.getPublicKey(scalarBytes, false)` returns the uncompressed SEC1 point
+(`0x04 || x || y`) via real elliptic-curve scalar multiplication — audited library code, not hand-rolled
+math, doing the one thing native WebCrypto has no operation for at all. With `x`/`y` in hand, build a
+complete, self-consistent `{kty, crv, x, y, d}` JWK and import it through WebCrypto's ordinary private-
+key path — the same shape (and the same `importKey('jwk', ...)` call) every other EC private key in
+this app already goes through. This isn't a corner case any implementation might reasonably skip; it's
+the textbook way to import an EC key, verified via Node's own WebCrypto (a different engine than
+Chromium, sharing nothing but spec compliance) before shipping. Real on-device Safari confirmation is
+still the only way to know for certain — ask for it again after this change deploys — but there is no
+known implementation that rejects a complete, correctly-computed JWK the way WebKit rejected the
+omitted-public-key PKCS8 shape.
+
+**Lesson underneath the crypto:** the two options weighed originally — the native trick with a
+real-device check afterward, or a small audited library up front — were both reasonable, and the
+"zero new dependencies" native option was chosen first specifically because it was cheaper *if it
+worked*. It didn't, and the fallback plan existed and was followed through exactly because it had been
+named in advance rather than invented under pressure once the failure showed up.
 
 ### Signing Is Opportunistic, Not Yet Enforced
 

@@ -3,9 +3,14 @@
 // Everything here builds on two native Web Crypto primitives — ECDH (P-256)
 // for key agreement and AES-GCM for authenticated encryption — reused for
 // every purpose in the app: message content, sealed per-identity envelopes,
-// and session-key wrapping. No custom elliptic-curve math, no hand-rolled
-// AEAD. See docs/system-design.md §3 for how these compose into the session
-// model, and docs/experience.md for the design rationale.
+// and session-key wrapping. No hand-rolled elliptic-curve math, no
+// hand-rolled AEAD. The one exception is `derivePersonalSigningKeyPair`
+// below, which uses `@noble/curves` (a small, widely-used, audited library)
+// for exactly the one operation native WebCrypto has no way to do at all:
+// computing a public key from an arbitrary raw scalar — see that function's
+// own comment for why. See docs/system-design.md §3 for how these compose
+// into the session model, and docs/experience.md for the design rationale.
+import { p256 } from '@noble/curves/nist.js'
 
 const ECDH_PARAMS: EcKeyImportParams | EcKeyGenParams = { name: 'ECDH', namedCurve: 'P-256' }
 const ECDSA_PARAMS: EcKeyImportParams | EcKeyGenParams = { name: 'ECDSA', namedCurve: 'P-256' }
@@ -202,14 +207,26 @@ export async function verifySignature(publicKey: CryptoKey, signature: string, d
 // WebCrypto has no "compute a public key from a raw scalar" operation — it
 // only generates fresh random keypairs, or imports ones where the public
 // point is already known and gets checked for consistency with the private
-// scalar. PKCS8's ECPrivateKey structure (RFC 5915) has an OPTIONAL public-key
-// field, though, and importing one with that field omitted makes the browser
-// derive and attach the matching public key itself. Verified directly against
-// Chromium (not just Node) before relying on it: import succeeds, the key
-// signs, and the exported public half correctly verifies that signature — see
-// "Deriving an ECDSA Keypair From a Raw Scalar" in docs/experience.md for the
-// verification script and the one open risk this doesn't close (unconfirmed
-// on Safari/WebKit, this app's actual mobile target).
+// scalar. An earlier version of this function exploited PKCS8's ECPrivateKey
+// structure (RFC 5915) having an OPTIONAL public-key field, on the theory
+// that importing one with that field omitted would make the browser derive
+// and attach the matching public key itself — verified against real Chromium
+// before shipping, but **confirmed broken on real iOS Safari** the first time
+// this ran on the user's own device (`DataError: Data provided to an
+// operation does not meet requirements` — the literal error WebKit throws for
+// this, independently documented in @noble/curves' own source for the same
+// reason). Safari and Firefox both require the public point to already be
+// present; Chromium's tolerance of its absence turned out to be the
+// exception, not the rule. See "Deriving an ECDSA Keypair From a Raw Scalar"
+// in docs/experience.md for the full story.
+//
+// The fix: compute the public point ourselves with `@noble/curves`'s pure-JS
+// P-256 implementation (audited, widely used, no WebCrypto involved for this
+// one step), then import a fully self-consistent `{x, y, d}` JWK through
+// WebCrypto's ordinary, universally-supported private-key import path — the
+// same path every EC private key in this app already goes through elsewhere.
+// This isn't hand-rolled elliptic-curve math; it's a vetted library used for
+// exactly the one operation native WebCrypto has no way to do at all.
 const PERSONAL_SIGNING_PURPOSE = 'personal-signing'
 
 function reduceModOrder(digest: Uint8Array, order: bigint): bigint {
@@ -229,44 +246,6 @@ function bigIntToFixedBytes(value: bigint, length: number): Uint8Array {
   return bytes
 }
 
-/** Minimal DER encoders — just enough ASN.1 to build the one PKCS8 shape below, nothing general-purpose. */
-function derLength(n: number): number[] {
-  if (n < 0x80) return [n]
-  const bytes: number[] = []
-  let v = n
-  while (v > 0) {
-    bytes.unshift(v & 0xff)
-    v >>= 8
-  }
-  return [0x80 | bytes.length, ...bytes]
-}
-function derSequence(contents: number[][]): number[] {
-  const body = contents.flat()
-  return [0x30, ...derLength(body.length), ...body]
-}
-function derOctetString(bytes: number[]): number[] {
-  return [0x04, ...derLength(bytes.length), ...bytes]
-}
-function derSmallInt(n: number): number[] {
-  return [0x02, ...derLength(1), n]
-}
-function derOid(hex: string): number[] {
-  const bytes: number[] = []
-  for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16))
-  return [0x06, ...derLength(bytes.length), ...bytes]
-}
-
-const EC_PUBLIC_KEY_OID = '2a8648ce3d0201' // 1.2.840.10045.2.1
-const P256_OID = '2a8648ce3d030107' // 1.2.840.10045.3.1.7
-
-/** Builds a PKCS8 PrivateKeyInfo for a raw P-256 scalar, deliberately omitting ECPrivateKey's optional public-key field — see the comment above. */
-function pkcs8FromP256Scalar(scalarBytes: Uint8Array): Uint8Array {
-  const ecPrivateKey = derSequence([derSmallInt(1), derOctetString([...scalarBytes])])
-  const algorithmId = derSequence([derOid(EC_PUBLIC_KEY_OID), derOid(P256_OID)])
-  const pkcs8 = derSequence([derSmallInt(0), algorithmId, derOctetString(ecPrivateKey)])
-  return new Uint8Array(pkcs8)
-}
-
 export async function derivePersonalSigningKeyPair(ecdhPrivateKey: CryptoKey): Promise<CryptoKey> {
   const jwk = await exportPrivateKey(ecdhPrivateKey)
   const scalar = base64ToBuf(urlSafeBase64ToStandard(jwk.d!))
@@ -277,8 +256,19 @@ export async function derivePersonalSigningKeyPair(ecdhPrivateKey: CryptoKey): P
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', input))
 
   const derivedScalar = bigIntToFixedBytes(reduceModOrder(digest, P256_ORDER), 32)
-  const pkcs8 = pkcs8FromP256Scalar(derivedScalar)
-  return crypto.subtle.importKey('pkcs8', pkcs8, ECDSA_PARAMS, true, ['sign'])
+  const uncompressedPoint = p256.getPublicKey(derivedScalar, false) // 0x04 || x(32) || y(32)
+  const x = uncompressedPoint.slice(1, 33)
+  const y = uncompressedPoint.slice(33, 65)
+
+  const derivedJwk: JsonWebKey = {
+    kty: 'EC',
+    crv: 'P-256',
+    x: bufToBase64(x.buffer).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+    y: bufToBase64(y.buffer).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+    d: bufToBase64(derivedScalar.buffer).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+    ext: true,
+  }
+  return crypto.subtle.importKey('jwk', derivedJwk, ECDSA_PARAMS, true, ['sign'])
 }
 
 // --- Join secrets ------------------------------------------------------------

@@ -8,7 +8,9 @@
 // model, and docs/experience.md for the design rationale.
 
 const ECDH_PARAMS: EcKeyImportParams | EcKeyGenParams = { name: 'ECDH', namedCurve: 'P-256' }
+const ECDSA_PARAMS: EcKeyImportParams | EcKeyGenParams = { name: 'ECDSA', namedCurve: 'P-256' }
 const AES_PARAMS = { name: 'AES-GCM', length: 256 }
+const P256_ORDER = BigInt('0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551')
 
 export async function generateKeyPair(): Promise<CryptoKeyPair> {
   return crypto.subtle.generateKey(ECDH_PARAMS, true, ['deriveKey', 'deriveBits']) as Promise<CryptoKeyPair>
@@ -137,6 +139,146 @@ export async function openSealed<T>(envelope: SealedEnvelope, recipientPrivateKe
   const sharedKey = await deriveSharedKey(recipientPrivateKey, ephemeralPublicKey)
   const json = await decryptText(sharedKey, { ciphertext: envelope.ciphertext, iv: envelope.iv })
   return JSON.parse(json) as T
+}
+
+// --- Signing (ECDSA P-256) ---------------------------------------------------
+// Two different origins for a signing keypair, for two different reasons —
+// see docs/system-design.md §3's "Stage E" entry for the full rationale.
+//
+// 1. An admin signing keypair is freshly GENERATED, once, at session
+//    creation — same reasoning as the admin ECDH keypair (generateKeyPair
+//    above, reused as-is): a session's admin authority must be a property of
+//    that session, not derivable from anything about the creator's real
+//    identity.
+// 2. Every identity's own personal signing keypair is DERIVED from its
+//    existing ECDH private key, not generated independently — see
+//    derivePersonalSigningKeyPair below.
+//
+// Both produce an ordinary ECDSA CryptoKey; signData/verifySignature work on
+// either without caring which.
+
+export async function generateAdminSigningKeyPair(): Promise<CryptoKeyPair> {
+  return crypto.subtle.generateKey(ECDSA_PARAMS, true, ['sign', 'verify']) as Promise<CryptoKeyPair>
+}
+
+/** Strips key_ops for the same reason importPrivateKey does — publicJwkFromPrivateJwk sets it to [], which mismatches a ['verify'] usage request. */
+export async function importEcdsaPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
+  const { key_ops: _key_ops, ...rest } = jwk
+  return crypto.subtle.importKey('jwk', rest, ECDSA_PARAMS, true, ['verify'])
+}
+
+/** Same key_ops-stripping as importPrivateKey above — this app's own exports are the only source, so it's safe to relax on our own read path. */
+export async function importEcdsaPrivateKey(jwk: JsonWebKey): Promise<CryptoKey> {
+  const { key_ops: _key_ops, ...rest } = jwk
+  return crypto.subtle.importKey('jwk', rest, ECDSA_PARAMS, true, ['sign'])
+}
+
+export async function signData(privateKey: CryptoKey, data: string): Promise<string> {
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, new TextEncoder().encode(data))
+  return bufToBase64(sig)
+}
+
+export async function verifySignature(publicKey: CryptoKey, signature: string, data: string): Promise<boolean> {
+  return crypto.subtle.verify(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    publicKey,
+    base64ToBuf(signature),
+    new TextEncoder().encode(data),
+  )
+}
+
+// --- Personal signing keypair, derived rather than generated -----------------
+// A message's `sender` field is otherwise just a self-reported string with
+// nothing binding it to the identity it names — any participant holding the
+// shared session key could write a message claiming to be anyone else. This
+// closes that: every identity gets a signing keypair derived from its
+// existing ECDH private key (SHA-256(ecdhPrivateKeyBytes || purpose), reduced
+// mod the curve order, used directly as the ECDSA private scalar) rather than
+// generated independently — see docs/system-design.md §3 for why deriving
+// matters (a personal/account/guest link only ever carries one private key;
+// generating a second, independent signing key would mean the link needs to
+// carry two just to be that identity somewhere new).
+//
+// WebCrypto has no "compute a public key from a raw scalar" operation — it
+// only generates fresh random keypairs, or imports ones where the public
+// point is already known and gets checked for consistency with the private
+// scalar. PKCS8's ECPrivateKey structure (RFC 5915) has an OPTIONAL public-key
+// field, though, and importing one with that field omitted makes the browser
+// derive and attach the matching public key itself. Verified directly against
+// Chromium (not just Node) before relying on it: import succeeds, the key
+// signs, and the exported public half correctly verifies that signature — see
+// "Deriving an ECDSA Keypair From a Raw Scalar" in docs/experience.md for the
+// verification script and the one open risk this doesn't close (unconfirmed
+// on Safari/WebKit, this app's actual mobile target).
+const PERSONAL_SIGNING_PURPOSE = 'personal-signing'
+
+function reduceModOrder(digest: Uint8Array, order: bigint): bigint {
+  let n = 0n
+  for (const byte of digest) n = (n << 8n) | BigInt(byte)
+  n = n % order
+  return n === 0n ? 1n : n // 0 isn't a valid private scalar; astronomically unlikely, defensive only
+}
+
+function bigIntToFixedBytes(value: bigint, length: number): Uint8Array {
+  const bytes = new Uint8Array(length)
+  let n = value
+  for (let i = length - 1; i >= 0; i--) {
+    bytes[i] = Number(n & 0xffn)
+    n >>= 8n
+  }
+  return bytes
+}
+
+/** Minimal DER encoders — just enough ASN.1 to build the one PKCS8 shape below, nothing general-purpose. */
+function derLength(n: number): number[] {
+  if (n < 0x80) return [n]
+  const bytes: number[] = []
+  let v = n
+  while (v > 0) {
+    bytes.unshift(v & 0xff)
+    v >>= 8
+  }
+  return [0x80 | bytes.length, ...bytes]
+}
+function derSequence(contents: number[][]): number[] {
+  const body = contents.flat()
+  return [0x30, ...derLength(body.length), ...body]
+}
+function derOctetString(bytes: number[]): number[] {
+  return [0x04, ...derLength(bytes.length), ...bytes]
+}
+function derSmallInt(n: number): number[] {
+  return [0x02, ...derLength(1), n]
+}
+function derOid(hex: string): number[] {
+  const bytes: number[] = []
+  for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16))
+  return [0x06, ...derLength(bytes.length), ...bytes]
+}
+
+const EC_PUBLIC_KEY_OID = '2a8648ce3d0201' // 1.2.840.10045.2.1
+const P256_OID = '2a8648ce3d030107' // 1.2.840.10045.3.1.7
+
+/** Builds a PKCS8 PrivateKeyInfo for a raw P-256 scalar, deliberately omitting ECPrivateKey's optional public-key field — see the comment above. */
+function pkcs8FromP256Scalar(scalarBytes: Uint8Array): Uint8Array {
+  const ecPrivateKey = derSequence([derSmallInt(1), derOctetString([...scalarBytes])])
+  const algorithmId = derSequence([derOid(EC_PUBLIC_KEY_OID), derOid(P256_OID)])
+  const pkcs8 = derSequence([derSmallInt(0), algorithmId, derOctetString(ecPrivateKey)])
+  return new Uint8Array(pkcs8)
+}
+
+export async function derivePersonalSigningKeyPair(ecdhPrivateKey: CryptoKey): Promise<CryptoKey> {
+  const jwk = await exportPrivateKey(ecdhPrivateKey)
+  const scalar = base64ToBuf(urlSafeBase64ToStandard(jwk.d!))
+  const purposeBytes = new TextEncoder().encode(PERSONAL_SIGNING_PURPOSE)
+  const input = new Uint8Array(scalar.byteLength + purposeBytes.length)
+  input.set(new Uint8Array(scalar), 0)
+  input.set(purposeBytes, scalar.byteLength)
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', input))
+
+  const derivedScalar = bigIntToFixedBytes(reduceModOrder(digest, P256_ORDER), 32)
+  const pkcs8 = pkcs8FromP256Scalar(derivedScalar)
+  return crypto.subtle.importKey('pkcs8', pkcs8, ECDSA_PARAMS, true, ['sign'])
 }
 
 // --- Join secrets ------------------------------------------------------------

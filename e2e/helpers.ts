@@ -16,6 +16,29 @@ import { expect } from './fixtures'
 export const NETWORK_TIMEOUT = 20000
 
 /**
+ * Reads the app's own on-screen debug log (see src/debug.ts and "Debugging
+ * on device (no console)" in CLAUDE.md) — every Vue error, console.error/warn,
+ * window error, and unhandled rejection the app itself has seen, with the
+ * real exception detail (name, message, a few stack frames), not just
+ * whatever static UI text a catch block chose to show. Opens the footer's
+ * "View logs" panel if it isn't already open. The single most useful tool
+ * for a test that times out with no other clue why: the app was very
+ * possibly already logging the real reason the whole time.
+ */
+export async function getDebugLogText(page: Page): Promise<string> {
+  const isOpen = await page.locator('.log-window').isVisible()
+  if (!isOpen) await page.getByRole('button', { name: 'View logs' }).click()
+  return page.locator('.debug-log').innerText()
+}
+
+/** Just the error/warn lines from the debug log — usually all that's needed to diagnose a failure. */
+export async function getDebugErrors(page: Page): Promise<string[]> {
+  const isOpen = await page.locator('.log-window').isVisible()
+  if (!isOpen) await page.getByRole('button', { name: 'View logs' }).click()
+  return page.locator('.debug-log li.error, .debug-log li.warn').allTextContents()
+}
+
+/**
  * accounts.username is globally unique in the live database — always
  * generate one, never hardcode. Kept under guestName.ts's 20-character
  * truncateName limit (a base36 timestamp + a short random suffix, not the
@@ -142,7 +165,12 @@ export async function sendInviteByKey(page: Page, publicKeyBlob: string): Promis
   const errorText = page.locator('.modal-box .error')
   await expect(sentText.or(errorText)).toBeVisible({ timeout: NETWORK_TIMEOUT })
   if (await errorText.isVisible()) {
-    throw new Error(`sendInviteByKey: the app reported an error instead of sending: "${await errorText.textContent()}"`)
+    const uiError = await errorText.textContent()
+    const debugErrors = await getDebugErrors(page)
+    throw new Error(
+      `sendInviteByKey: the app reported an error instead of sending: "${uiError}"\n` +
+        (debugErrors.length ? `App debug log:\n${debugErrors.join('\n')}` : '(debug log had no error/warn entries)'),
+    )
   }
   await page.getByRole('button', { name: 'Close' }).click()
 }

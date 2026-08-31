@@ -143,4 +143,26 @@ export const test = base.extend<{ manifest: TestManifest }>({
   },
 })
 
+// A generic safety net: whenever a test fails, capture whatever the app's
+// own on-screen debug log (src/debug.ts) had recorded on the default page —
+// real exception detail (name, message, stack frames), not just static UI
+// text a catch block chose to show. This is what turned second-account-via-
+// invite's silent, uninformative timeout into an actual diagnosis. Scoped to
+// the default `page` fixture only — a scenario using extra browser contexts
+// (most of them do) won't get this for pages it created itself; the specific
+// helper that needs it (sendInviteByKey) reads the log inline instead.
+// Attachments land in the test's results directory, which ci.yml uploads as
+// an artifact on failure.
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status === testInfo.expectedStatus) return
+  try {
+    const isOpen = await page.locator('.log-window').isVisible()
+    if (!isOpen) await page.getByRole('button', { name: 'View logs' }).click({ timeout: 2000 })
+    const logText = await page.locator('.debug-log').innerText({ timeout: 2000 })
+    await testInfo.attach('app-debug-log', { body: logText, contentType: 'text/plain' })
+  } catch (err) {
+    await testInfo.attach('app-debug-log-capture-failed', { body: String(err), contentType: 'text/plain' })
+  }
+})
+
 export { expect } from '@playwright/test'

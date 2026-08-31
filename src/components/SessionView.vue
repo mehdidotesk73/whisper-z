@@ -115,7 +115,11 @@ let ownAccessRow: SessionAccessRow | null = null
 // grant arriving live), unlike everything else read from ownAccessPayload,
 // which is only ever consulted at the moment an action button is clicked.
 const canInvite = ref(false)
-const isOwner = ref(false) // reactive mirror of ownAccessPayload?.role === 'owner', for the admin-only Grant button
+// True only when this identity is both the owner AND actually holds admin
+// key material — a session created before Stage E has role 'owner' but no
+// admin keys at all, so role alone isn't enough to safely offer the Grant
+// button (see onMounted).
+const canGrant = ref(false)
 // Other participants seen so far (session_participants + anyone who's sent
 // a message), for the admin-only "grant invite access" panel — never
 // includes ownPublicKeyId. capabilityGrantsSeen tracks which of them
@@ -372,13 +376,12 @@ onMounted(async () => {
     sessionKey = await importSessionKey(access.sessionKey)
     ownAccessPayload = access
     canInvite.value = hasCapability(access, 'invite')
-    isOwner.value = access.role === 'owner'
-
-    // Populate participantSigningKeys before loading any messages below, so
-    // the very first render can verify signatures rather than treating
-    // everyone as "no known key yet."
-    for (const row of await fetchParticipants(activeSessionId)) await registerParticipantRow(row)
-    participantChannel = subscribeParticipants(activeSessionId, registerParticipantRow)
+    // A session created before Stage E shipped has role 'owner' but no
+    // admin key material at all — "can grant" needs both, not just the
+    // role, or the button below would offer something that silently does
+    // nothing when clicked (the same class of bug as an earlier, unrelated
+    // modal issue this project already hit once).
+    canGrant.value = access.role === 'owner' && !!access.adminEcdhPrivateKey && !!access.adminSigningPrivateKey
 
     if (props.sessionId) {
       // Always send as the account's real key, even for a migrated session
@@ -397,6 +400,16 @@ onMounted(async () => {
       // from an unrelated direct join, without this guest visit being linked.
       migrated.value = await isIdentityMerged(currentAccount.value, activeSessionId, ownPublicKeyId)
     }
+
+    // Populate participantSigningKeys (and otherParticipantIds) before
+    // loading any messages below, so the very first render can verify
+    // signatures rather than treating everyone as "no known key yet." Must
+    // come after ownPublicKeyId is resolved above — registerParticipantRow
+    // filters "not me" against it, and until this point (for an
+    // account-backed route) it's still empty, which used to let the admin's
+    // own name leak into the "grant invite access" panel's participant list.
+    for (const row of await fetchParticipants(activeSessionId)) await registerParticipantRow(row)
+    participantChannel = subscribeParticipants(activeSessionId, registerParticipantRow)
 
     windowStart.value = new Date(Date.now() - MESSAGE_PAGE_DAYS * 24 * 60 * 60 * 1000).toISOString()
     const existing = await fetchMessagesInRange(activeSessionId, windowStart.value, null)
@@ -665,7 +678,13 @@ function hasBeenGrantedInvite(participantId: string): boolean {
 }
 
 async function grantInviteTo(participantId: string) {
-  if (!sessionKey || !ownAccessPayload?.adminEcdhPrivateKey || !ownAccessPayload.adminSigningPrivateKey) return
+  if (!sessionKey || !ownAccessPayload?.adminEcdhPrivateKey || !ownAccessPayload.adminSigningPrivateKey) {
+    // canGrant being true should already guarantee this — a visible error
+    // rather than a silent no-op if it somehow doesn't, so a click never
+    // just appears to do nothing (see canGrant's doc comment in onMounted).
+    grantError.value = 'This session has no admin keys to grant with — it may predate this feature.'
+    return
+  }
   grantingTo.value = participantId
   grantError.value = ''
   try {
@@ -759,7 +778,7 @@ function goHome() {
             <button class="menu-item" @click="select(openInviteByKeyModal)">By public key</button>
           </template>
         </MenuButton>
-        <button v-if="status === 'ready' && isOwner" class="chip-ghost tone-neutral" @click.stop="toggleGrant">
+        <button v-if="status === 'ready' && canGrant" class="chip-ghost tone-neutral" @click.stop="toggleGrant">
           Grant access ▾
         </button>
       </div>

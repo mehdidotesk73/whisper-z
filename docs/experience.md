@@ -293,6 +293,45 @@ answer": a key stuck on its own placeholder gets retried every time something as
 cost, while a key that's already resolved to a real name is still never re-fetched. A true guest
 identity just keeps quietly failing the same lookup every time it's asked about, which is correct.
 
+### Peer-Relay Cover Traffic to Hide the Session Graph — Rejected
+
+Prompted by a design review of exactly what this schema does and doesn't hide: content and identity
+are encrypted, but *who's talking to whom* isn't — the moment two people have the same session open,
+`subscribeMessages`/`subscribeParticipants`'s realtime channels put both their connections in the
+same channel, tagged with the plaintext `session_id`, live, in Supabase's own connection registry. No
+decryption or IP correlation needed; the subscription itself is the graph edge. See "A second,
+stronger version of that same leak" in `docs/system-design.md` §3 for the full writeup.
+
+The proposed fix: have every client subscribe to a random spread of session ids (most of them decoys,
+not its own), and have delivery flow peer-to-peer — client A fetches a row from Supabase as a decoy on
+someone else's behalf and forwards it to them, so a client's own messages arrive *through* another
+user rather than by subscribing to its own session directly. This is a real category of technique
+(mix networks, cover traffic — Tor, Vuvuzela, Pung all attack this exact problem), so the instinct
+was right. It doesn't work *here*, for a reason specific to this app's threat model rather than a mere
+engineering inconvenience:
+
+- **Sybil attack, and it's fatal, not just a weakness.** Account creation in this app is free and
+  unlimited — no cost, no invite gate, no proof of anything. The one party this scheme tries to hide
+  from (whoever operates Supabase) can trivially create thousands of fake "peer" accounts and
+  volunteer them as relays, becoming a large fraction of the anonymity set for free. At that point it's
+  back to directly observing the traffic it was supposed to be blinded from, just with an extra hop.
+  Every real mix network solves this with something this app has none of: a vetted or costly relay
+  set, or enough independent, non-colluding operators that no one party can dominate it. A handful of a
+  two-person chat app's own end users can't provide either.
+- **The rendezvous problem just relocates by one hop.** For client A to forward a row to client B
+  without Supabase seeing that pairing, A and B still need some channel to find each other — and
+  establishing *that* needs a lookup that doesn't itself reveal "A and B are related," which is the
+  same problem recursively, not a solved one.
+- **It trades away offline delivery**, the thing the current database-backed design gives for free: a
+  message sent while the recipient is offline just waits in Postgres. Peer relaying makes delivery
+  depend on some other end user's browser tab being open and cooperating in real time — a reliability
+  regression, not just a privacy trade, for an app with a small number of concurrent users.
+
+Conclusion: this stays a documented, accepted structural limitation (see `docs/system-design.md` §3)
+rather than a half-built mitigation. Dedicated research systems throw non-colluding servers and heavy
+bandwidth overhead at this exact problem and still don't reach "free, on one managed Postgres
+instance" — not something to bolt on here.
+
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)

@@ -36,7 +36,7 @@ test('an invite that is never accepted does not grant access on its own', async 
     // already had at least as long to run.
     await account2Page.reload()
     await expect(account2Page.getByRole('button', { name: 'Accept' })).toBeVisible({ timeout: NETWORK_TIMEOUT })
-    await expect(account2Page.locator('.list .row')).toHaveCount(0)
+    await expect(account2Page.locator('.list .row:not(.invite-row)')).toHaveCount(0)
   } finally {
     await account2Context.close()
   }

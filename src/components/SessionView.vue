@@ -508,7 +508,23 @@ function closeAllPanels() {
   showAliases.value = false
 }
 
-useOutsideClick(panelArea, closeAllPanels)
+// Warning/Migrate are inline panels that actually live inside panelArea's
+// DOM subtree, so outside-click is the only thing that closes them. The
+// three Modal-backed panels (Invite by link, Invite by key, Aliases) render
+// as siblings *after* panelArea closes, not inside it — Modal.vue already
+// closes itself correctly on its own backdrop click (`@click.self`), so
+// wiring the *same* outside-click listener to close them too was treating
+// "clicked anywhere inside the modal" as "clicked outside panelArea" and
+// closing it instantly, before a tap on the input or a button ever landed.
+// closeAllPanels() itself is still right for "opening one closes the
+// others" (see toggleWarning/toggleMigrate/toggleAliases/openInvite*Modal
+// above) — only the outside-click trigger needed to be scoped down.
+function closeInlinePanels() {
+  showWarning.value = false
+  showMigrate.value = false
+}
+
+useOutsideClick(panelArea, closeInlinePanels)
 
 function goHome() {
   navigate(homeHash)

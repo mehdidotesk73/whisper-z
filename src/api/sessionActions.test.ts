@@ -12,9 +12,24 @@ import {
   decryptText,
   openSealed,
   deriveCapability,
+  derivePersonalSigningKeyPair,
+  verifySignature,
+  importEcdsaPublicKey,
+  publicJwkFromPrivateJwk,
+  exportPrivateKey,
+  canonicalPublicKeyId,
 } from '../lib/crypto'
-import { parseParticipantPayload, hasCapability, grantCapability, acceptCapabilityGrant } from './sessionActions'
-import type { SessionAccessPayload, CapabilityGrantEntry } from '../lib/sessionTypes'
+import {
+  parseParticipantPayload,
+  hasCapability,
+  grantCapability,
+  acceptCapabilityGrant,
+  logInviteSent,
+  logJoined,
+  inviteSentSigningInput,
+  joinedSigningInput,
+} from './sessionActions'
+import type { SessionAccessPayload, CapabilityGrantEntry, InviteSentEntry, JoinedEntry } from '../lib/sessionTypes'
 import type { SessionAccessRow } from './sessions'
 
 const sendMessageMock = vi.fn((..._args: unknown[]) => Promise.resolve(true))
@@ -193,5 +208,55 @@ describe('grantCapability / acceptCapabilityGrant', () => {
     )
     expect(accepted).toBeNull()
     expect(updateSessionAccessMock).not.toHaveBeenCalled()
+  })
+})
+
+async function personalSigningPublicKey(ecdhPrivateKey: CryptoKey): Promise<JsonWebKey> {
+  const signingKey = await derivePersonalSigningKeyPair(ecdhPrivateKey)
+  return publicJwkFromPrivateJwk(await exportPrivateKey(signingKey))
+}
+
+describe('logInviteSent', () => {
+  it('writes a signed, verifiable invite-sent entry naming the inviter and invitee', async () => {
+    sendMessageMock.mockClear()
+    const inviter = await generateKeyPair()
+    const invitee = await generateKeyPair()
+    const sessionKey = await generateSessionKey()
+    const inviterPublicKeyId = canonicalPublicKeyId(await exportPublicKey(inviter.publicKey))
+    const inviteePublicKeyId = canonicalPublicKeyId(await exportPublicKey(invitee.publicKey))
+
+    const ok = await logInviteSent('session-1', sessionKey, inviter.privateKey, inviterPublicKeyId, inviteePublicKeyId)
+    expect(ok).toBe(true)
+    expect(sendMessageMock).toHaveBeenCalledTimes(1)
+
+    const [, ciphertext, iv] = sendMessageMock.mock.calls[0] as [string, string, string]
+    const entry = JSON.parse(await decryptText(sessionKey, { ciphertext, iv })) as InviteSentEntry
+    expect(entry.kind).toBe('invite-sent')
+    expect(entry.sender).toBe(inviterPublicKeyId)
+    expect(entry.inviteePublicKeyId).toBe(inviteePublicKeyId)
+
+    const verifyKey = await importEcdsaPublicKey(await personalSigningPublicKey(inviter.privateKey))
+    await expect(verifySignature(verifyKey, entry.signature, inviteSentSigningInput(entry))).resolves.toBe(true)
+  })
+})
+
+describe('logJoined', () => {
+  it('writes a signed, verifiable joined entry naming who joined and how', async () => {
+    sendMessageMock.mockClear()
+    const joiner = await generateKeyPair()
+    const sessionKey = await generateSessionKey()
+    const joinerPublicKeyId = canonicalPublicKeyId(await exportPublicKey(joiner.publicKey))
+
+    const ok = await logJoined('session-1', sessionKey, joiner.privateKey, joinerPublicKeyId, 'invite')
+    expect(ok).toBe(true)
+
+    const [, ciphertext, iv] = sendMessageMock.mock.calls.at(-1) as [string, string, string]
+    const entry = JSON.parse(await decryptText(sessionKey, { ciphertext, iv })) as JoinedEntry
+    expect(entry.kind).toBe('joined')
+    expect(entry.sender).toBe(joinerPublicKeyId)
+    expect(entry.via).toBe('invite')
+
+    const verifyKey = await importEcdsaPublicKey(await personalSigningPublicKey(joiner.privateKey))
+    await expect(verifySignature(verifyKey, entry.signature, joinedSigningInput(entry))).resolves.toBe(true)
   })
 })

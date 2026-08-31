@@ -91,7 +91,7 @@ async function join() {
     const json = await decryptText(joinKey, { ciphertext: claimed.ciphertext, iv: claimed.iv })
     const joinPayload = JSON.parse(json) as JoinPayload
 
-    const started = await joinExistingSession(joinPayload, currentAccount.value)
+    const started = await joinExistingSession(joinPayload, currentAccount.value, 'link')
     if (!started) {
       status.value = 'failed'
       return

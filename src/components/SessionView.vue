@@ -36,7 +36,15 @@ import {
   type ParticipantRow,
   type SessionAccessRow,
 } from '../api/sessions'
-import type { SessionAccessPayload, JoinPayload, DecodedMessage, CapabilityGrantEntry, SessionLogEntry } from '../lib/sessionTypes'
+import type {
+  SessionAccessPayload,
+  JoinPayload,
+  DecodedMessage,
+  CapabilityGrantEntry,
+  InviteSentEntry,
+  JoinedEntry,
+  SessionLogEntry,
+} from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
@@ -48,6 +56,9 @@ import {
   hasCapability,
   grantCapability,
   acceptCapabilityGrant,
+  logInviteSent,
+  inviteSentSigningInput,
+  joinedSigningInput,
 } from '../api/sessionActions'
 import { createSessionInvite, rejectInvite } from '../api/inviteActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
@@ -263,6 +274,43 @@ async function handleCapabilityGrant(id: string, entry: CapabilityGrantEntry): P
   return { id, kind: 'system', text }
 }
 
+/**
+ * Shared opportunistic-verification policy for anything signed with a
+ * sender's personal signing key (messages, invite-sent, joined — everything
+ * except capability grants, which are admin-signed instead): a sender with
+ * no known signing key yet renders unverified rather than being dropped
+ * (see participantSigningKeys' doc comment above), but a signature that
+ * fails to verify against a key we DO know is a real forgery signal.
+ */
+async function verifyOpportunistic(sender: string, signature: string, input: string): Promise<boolean> {
+  const signingKey = participantSigningKeys.get(sender)
+  if (!signingKey) return true
+  return verifySignature(signingKey, signature, input)
+}
+
+async function handleInviteSent(id: string, entry: InviteSentEntry): Promise<RenderedMessage | null> {
+  const input = inviteSentSigningInput(entry)
+  if (!(await verifyOpportunistic(entry.sender, entry.signature, input))) {
+    logDebug(`Dropped invite-sent entry ${id}: signature did not verify for sender ${entry.sender}`, 'warn')
+    return null
+  }
+  resolveName(entry.sender)
+  resolveName(entry.inviteePublicKeyId)
+  const text = `${nameFor(entry.sender)} invited ${nameFor(entry.inviteePublicKeyId)}`
+  return { id, kind: 'system', text }
+}
+
+async function handleJoined(id: string, entry: JoinedEntry): Promise<RenderedMessage | null> {
+  const input = joinedSigningInput(entry)
+  if (!(await verifyOpportunistic(entry.sender, entry.signature, input))) {
+    logDebug(`Dropped joined entry ${id}: signature did not verify for sender ${entry.sender}`, 'warn')
+    return null
+  }
+  resolveName(entry.sender)
+  const text = `${nameFor(entry.sender)} joined by ${entry.via === 'invite' ? 'invite' : 'join link'}`
+  return { id, kind: 'system', text }
+}
+
 async function decodeLogEntry(row: { id: string; ciphertext: string; iv: string }): Promise<RenderedMessage | null> {
   if (seenMessageIds.has(row.id) || !sessionKey) return null
   seenMessageIds.add(row.id)
@@ -271,6 +319,8 @@ async function decodeLogEntry(row: { id: string; ciphertext: string; iv: string 
     const plain = JSON.parse(json) as SessionLogEntry
 
     if (plain.kind === 'capability-grant') return await handleCapabilityGrant(row.id, plain)
+    if (plain.kind === 'invite-sent') return await handleInviteSent(row.id, plain)
+    if (plain.kind === 'joined') return await handleJoined(row.id, plain)
 
     // A legacy message (sent before Stage E) has no kind/signature at all —
     // still trusted, exactly as it always was; nothing here retroactively
@@ -281,14 +331,10 @@ async function decodeLogEntry(row: { id: string; ciphertext: string; iv: string 
     // race with a just-joined sender) renders unverified rather than being
     // dropped — see participantSigningKeys' doc comment above.
     if (plain.kind === 'message' && plain.signature) {
-      const signingKey = participantSigningKeys.get(plain.sender)
-      if (signingKey) {
-        const input = messageSigningInput(plain.sender, plain.text, plain.createdAt)
-        const valid = await verifySignature(signingKey, plain.signature, input)
-        if (!valid) {
-          logDebug(`Dropped message ${row.id}: signature did not verify for sender ${plain.sender}`, 'warn')
-          return null
-        }
+      const input = messageSigningInput(plain.sender, plain.text, plain.createdAt)
+      if (!(await verifyOpportunistic(plain.sender, plain.signature, input))) {
+        logDebug(`Dropped message ${row.id}: signature did not verify for sender ${plain.sender}`, 'warn')
+        return null
       }
     }
 
@@ -554,6 +600,9 @@ async function sendInviteByKey() {
       return
     }
     lastInviteId.value = created.id
+    if (sessionKey) {
+      await logInviteSent(activeSessionId, sessionKey, ownPrivateKey, ownPublicKeyId, canonicalPublicKeyId(targetPublicKeyJwk))
+    }
     // The inviter already holds this exact key (they just pasted it), so
     // naming who it belongs to here reveals nothing new to anyone else.
     const targetAccount = await fetchAccountByPublicKey(canonicalPublicKeyId(targetPublicKeyJwk))
@@ -1195,15 +1244,20 @@ function goHome() {
 }
 
 .system-tag {
-  align-self: center;
-  max-width: 90%;
-  padding: 0.3rem 0.7rem;
-  border-radius: 999px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
   color: var(--text-muted);
   font-size: 0.75rem;
   text-align: center;
+}
+
+.system-tag::before,
+.system-tag::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }
 
 .grant-row {

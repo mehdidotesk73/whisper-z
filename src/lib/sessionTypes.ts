@@ -115,5 +115,34 @@ export interface CapabilityGrantEntry {
   sealedSecret: SealedEnvelope
 }
 
+/**
+ * Written automatically when an existing account is invited by public key
+ * (never for a join-link invite, which has no target identity to name yet).
+ * Signed by the inviter's own personal signing key, same as a message —
+ * unlike a capability grant, there's no private payload here for anyone in
+ * particular; it's a plain, publicly-visible fact about the session.
+ */
+export interface InviteSentEntry {
+  kind: 'invite-sent'
+  sender: string
+  inviteePublicKeyId: string
+  createdAt: string
+  signature: string
+}
+
+/**
+ * Written automatically by whoever just joined, right after a genuine join
+ * (never for an account re-opening a link/invite it already redeemed — see
+ * alreadyHasAccess in api/sessionActions.ts). Signed by the joiner's own
+ * personal signing key, same as a message.
+ */
+export interface JoinedEntry {
+  kind: 'joined'
+  sender: string
+  via: 'link' | 'invite'
+  createdAt: string
+  signature: string
+}
+
 /** What a session_log row can decrypt to, from here on — see each variant's own doc comment. */
-export type SessionLogEntry = DecodedMessage | CapabilityGrantEntry
+export type SessionLogEntry = DecodedMessage | CapabilityGrantEntry | InviteSentEntry | JoinedEntry

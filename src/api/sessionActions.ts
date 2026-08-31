@@ -42,7 +42,14 @@ import {
   type SessionAccessRow,
 } from './sessions'
 import { extractPackedKey } from '../lib/route'
-import type { SessionAccessPayload, JoinPayload, ParticipantPayload, CapabilityGrantEntry } from '../lib/sessionTypes'
+import type {
+  SessionAccessPayload,
+  JoinPayload,
+  ParticipantPayload,
+  CapabilityGrantEntry,
+  InviteSentEntry,
+  JoinedEntry,
+} from '../lib/sessionTypes'
 import type { CurrentAccount } from '../lib/auth'
 
 /** Admin holds every capability by derivation; a member holds only what it's been granted and self-written. */
@@ -125,6 +132,55 @@ export async function acceptCapabilityGrant(
   const sealed = await sealForRecipient(payload, ownPublicKey)
   const ok = await updateSessionAccess(accessRow.id, sealed)
   return ok ? payload : null
+}
+
+/** Same field order at write time (here) and verify time (SessionView.vue) — exported so both share one implementation. */
+export function inviteSentSigningInput(entry: Omit<InviteSentEntry, 'kind' | 'signature'>): string {
+  return JSON.stringify({ kind: 'invite-sent', sender: entry.sender, inviteePublicKeyId: entry.inviteePublicKeyId, createdAt: entry.createdAt })
+}
+
+/**
+ * Auto-logged the moment an existing account is invited by public key — a
+ * plain, publicly-visible fact about the session (unlike a capability
+ * grant, nothing here is private to the invitee). Never called for a
+ * join-link invite, which has no target identity yet to name.
+ */
+export async function logInviteSent(
+  sessionId: string,
+  sessionKey: CryptoKey,
+  inviterPrivateKey: CryptoKey,
+  inviterPublicKeyId: string,
+  inviteePublicKeyId: string,
+): Promise<boolean> {
+  const createdAt = new Date().toISOString()
+  const unsigned = { sender: inviterPublicKeyId, inviteePublicKeyId, createdAt }
+  const signingKey = await derivePersonalSigningKeyPair(inviterPrivateKey)
+  const signature = await signData(signingKey, inviteSentSigningInput(unsigned))
+  const entry: InviteSentEntry = { kind: 'invite-sent', ...unsigned, signature }
+  const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(entry))
+  return sendMessage(sessionId, ciphertext, iv)
+}
+
+/** Same field order at write time (here) and verify time (SessionView.vue) — exported so both share one implementation. */
+export function joinedSigningInput(entry: Omit<JoinedEntry, 'kind' | 'signature'>): string {
+  return JSON.stringify({ kind: 'joined', sender: entry.sender, via: entry.via, createdAt: entry.createdAt })
+}
+
+/** Auto-logged by whoever just joined, right after a genuine join (never for an already-a-member no-op). */
+export async function logJoined(
+  sessionId: string,
+  sessionKey: CryptoKey,
+  joinerPrivateKey: CryptoKey,
+  joinerPublicKeyId: string,
+  via: 'link' | 'invite',
+): Promise<boolean> {
+  const createdAt = new Date().toISOString()
+  const unsigned = { sender: joinerPublicKeyId, via, createdAt }
+  const signingKey = await derivePersonalSigningKeyPair(joinerPrivateKey)
+  const signature = await signData(signingKey, joinedSigningInput(unsigned))
+  const entry: JoinedEntry = { kind: 'joined', ...unsigned, signature }
+  const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(entry))
+  return sendMessage(sessionId, ciphertext, iv)
 }
 
 /**
@@ -282,6 +338,7 @@ export async function startNewSession(account: CurrentAccount | null, title?: st
 export async function joinExistingSession(
   joinPayload: JoinPayload,
   account: CurrentAccount | null,
+  via: 'link' | 'invite',
 ): Promise<StartedSession | null> {
   if (account && (await alreadyHasAccess(account, joinPayload.sessionId))) {
     return { sessionId: joinPayload.sessionId, packedKey: null }
@@ -305,7 +362,9 @@ export async function joinExistingSession(
   if (!ok) return null
 
   const sessionKey = await importSessionKey(joinPayload.sessionKey)
+  const publicKeyId = canonicalPublicKeyId(await exportPublicKey(identity.publicKey))
   await addParticipantForIdentity(joinPayload.sessionId, sessionKey, identity.privateKey, identity.publicKey)
+  await logJoined(joinPayload.sessionId, sessionKey, identity.privateKey, publicKeyId, via)
 
   const packedKey = account ? null : packJwk(await exportPrivateKey(identity.privateKey))
   return { sessionId: joinPayload.sessionId, packedKey }

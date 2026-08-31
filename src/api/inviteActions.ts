@@ -85,7 +85,7 @@ export async function checkForInvites(account: CurrentAccount): Promise<PendingI
 
 /** Accepting an invite is exactly a normal join — the invite just delivered the JoinPayload privately. */
 export async function acceptInvite(invite: PendingInvite, account: CurrentAccount): Promise<StartedSession | null> {
-  const result = await joinExistingSession(invite.payload, account)
+  const result = await joinExistingSession(invite.payload, account, 'invite')
   if (result) await deleteInvite(invite.id)
   return result
 }

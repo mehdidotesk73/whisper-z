@@ -165,13 +165,21 @@ fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their 
   actually cascade — `session_access`, `join_access`, `session_invites`, and `private_account_state`
   have no enforced FK at all, so a cascade-only cleanup would silently leave most of what a test
   creates behind
-- **Couldn't verify the E2E run actually passes from this sandbox.** The browser's request to
-  Supabase came back as a 403 policy denial at this session's outbound proxy (confirmed via the
-  proxy's own status endpoint — a real egress policy decision, not a flaky timeout to chase). Vitest
-  and `npm run build` don't hit this because nothing in them makes a real network call; this is the
-  first thing in this project's test suite that does. Left unresolved on purpose rather than worked
-  around — the fix is verifying against this PR's actual GitHub Actions run, which has normal
-  internet egress, not fighting this sandbox's policy
+- **Couldn't verify the E2E run from this sandbox — verified from real CI instead.** The browser's
+  request to Supabase came back as a 403 policy denial at this session's outbound proxy (confirmed via
+  the proxy's own status endpoint — a real egress policy decision, not a flaky timeout to chase).
+  Vitest and `npm run build` don't hit this because nothing in them makes a real network call; this was
+  the first thing in this project's test suite that does. Pushed anyway and checked the PR's actual
+  GitHub Actions run, which passed — confirming the harness genuinely reaches Supabase and cleans up
+  after itself outside this sandbox
+- **First real run surfaced a genuine timing issue, not a harness bug.** The scenario failed once
+  (`.bubble.mine` not found within the default 5s) then passed on Playwright's automatic retry a few
+  seconds later. Root cause: `send()` in `SessionView.vue` doesn't render a sent message optimistically
+  — it only inserts into `session_log`, and the bubble appears once Supabase Realtime echoes the INSERT
+  back through `subscribeMessages`. On a freshly-opened Realtime channel (this is the first message
+  sent in that browser instance), that round trip occasionally runs past 5s. Fixed by giving that one
+  assertion a 15s timeout instead of leaning on the retry to hide it — a retry that happens to pass
+  isn't the same as a test that reliably captures the real latency it's asserting on
 
 ### v0.9.0 — 2026-08-30 (Stage E, part 1: schema renames)
 - **Renamed:** `session_access.owner_pub` → `owner_tag` (it's a one-way derived lookup tag, never a

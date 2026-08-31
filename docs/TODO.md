@@ -103,9 +103,10 @@ browser through the actual app against the live Supabase project (not a separate
 here). First scenario: start a session, send a message, confirm it renders. `e2e/fixtures.ts`'s
 `manifest` fixture tracks every identity a test creates and deletes everything it touched afterward,
 re-deriving lookup tags the same way the app does rather than needing a schema tag. Wired into the
-same CI `build` check. **Not yet confirmed passing in real CI** — this sandbox's network policy
-blocks reaching Supabase directly (403 at the egress proxy), so the first real signal is this PR's own
-GitHub Actions run.
+same CI `build` check, confirmed passing on GitHub Actions (this sandbox's own network can't reach
+Supabase at all, so that PR run was the first real signal) — see `docs/system-design.md` §7 for the
+one real timing issue it surfaced (a sent message renders only once Realtime echoes it back, not
+optimistically) and the fix.
 
 ## Next (Current Sprint)
 

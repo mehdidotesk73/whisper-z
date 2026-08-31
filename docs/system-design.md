@@ -691,12 +691,14 @@ leaves orphaned rows with no automatic backstop; treat that as a manual sweep fo
 against `sessions`/`accounts`) rather than something worth an FK/schema change for, unless it turns out
 to happen often.
 
-**Not yet verified working in real CI.** This sandbox's outbound network is proxied and policy-scoped;
-attempting the E2E run here got the browser's request to Supabase rejected with a 403 policy denial at
-the proxy (confirmed via the proxy's own status endpoint, not a guess) — a sandbox-network limitation,
-not a defect found in the test or the app. The code passes `npm run build` and `npm test` and is
-believed correct, but the first real signal on whether it actually reaches Supabase and passes comes
-from this PR's own GitHub Actions run.
+**Confirmed passing in real CI** (this sandbox's own network can't reach Supabase at all — a 403
+policy denial at the proxy, confirmed via the proxy's status endpoint — so GitHub Actions was the
+first real signal). The run did surface one real timing issue: a sent message isn't rendered
+optimistically (`send()` in `SessionView.vue` only inserts into `session_log`; the bubble appears once
+Supabase Realtime echoes the INSERT back through `subscribeMessages`), and the test's default 5s
+assertion timeout occasionally isn't enough for a freshly-opened Realtime channel's first round trip —
+it flaked once, passed on Playwright's automatic retry (`retries: 1` in CI) a few seconds later. Fixed
+by giving that one assertion a 15s timeout rather than relying on the retry to paper over it.
 
 **Production and preview, both via Netlify** (see `netlify.toml`): `main` pushes build production; every other branch/PR gets its own Deploy Preview.
 

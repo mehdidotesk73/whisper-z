@@ -19,5 +19,11 @@ test('starting a session and sending a message renders it in the thread', async 
   await page.getByPlaceholder('Message…').fill(messageText)
   await page.getByRole('button', { name: 'Send' }).click()
 
-  await expect(page.locator('.bubble.mine')).toContainText(messageText)
+  // A sent message isn't rendered optimistically — SessionView.vue's send()
+  // only inserts into session_log; the bubble only appears once Supabase
+  // Realtime echoes the INSERT back through subscribeMessages. The default
+  // 5s assertion timeout flaked on a cold Realtime channel's first round
+  // trip in CI (passed on Playwright's automatic retry, ~3s in) — this is
+  // calibrating to that real, pre-existing latency, not working around a bug.
+  await expect(page.locator('.bubble.mine')).toContainText(messageText, { timeout: 15000 })
 })

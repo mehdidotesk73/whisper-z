@@ -1,0 +1,169 @@
+// Shared Playwright actions for the app's UI flows — factored out so each
+// scenario spec reads as its own story instead of re-deriving selectors.
+// See docs/system-design.md §7 for how these tests fit alongside Vitest's
+// pure-logic coverage, and e2e/fixtures.ts for how cleanup works.
+import type { Page } from '@playwright/test'
+import { expect } from './fixtures'
+
+// A sent message is never rendered optimistically anywhere in this app —
+// every bubble appears only once Supabase Realtime echoes the row back (see
+// start-session-and-message.spec.ts's flakiness writeup in docs/experience.md).
+// Every wait for a message here uses this instead of Playwright's 5s default.
+export const RENDER_TIMEOUT = 15000
+
+/** accounts.username is globally unique in the live database — always generate one, never hardcode. */
+export function uniqueUsername(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+/** From the logged-out home screen: creates an account, returns its account link. */
+export async function createAccount(page: Page, username: string): Promise<string> {
+  await page.getByRole('button', { name: 'Create an account' }).click()
+  await page.getByPlaceholder('Pick a username').fill(username)
+  await page.getByRole('button', { name: 'Create account' }).click()
+
+  const linkInput = page.locator('input[readonly]')
+  await expect(linkInput).toBeVisible()
+  const accountLink = await linkInput.inputValue()
+
+  await page.getByRole('button', { name: 'Continue' }).click()
+  await expect(page.getByText('Signed in as')).toBeVisible()
+  return accountLink
+}
+
+/** From anywhere an account is signed in: logs out back to the home screen. */
+export async function logOut(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Log out' }).click()
+}
+
+/** From the logged-out home screen: logs in with an account link (or bare key). */
+export async function logIn(page: Page, accountLinkOrKey: string): Promise<void> {
+  await page.getByRole('button', { name: 'Log in' }).click()
+  await page.getByPlaceholder('Paste your account link or key').fill(accountLinkOrKey)
+  await page.getByRole('button', { name: 'Log in' }).click()
+  await expect(page.getByText('Signed in as')).toBeVisible()
+}
+
+/** From AccountHome: starts a session, returns the sessionId from the `#/mysession/<id>` URL. */
+export async function startSessionAsAccount(page: Page): Promise<string> {
+  await page.getByRole('button', { name: 'Start a session' }).click()
+  await expect(page).toHaveURL(/#\/mysession\//)
+  return page.url().split('#/mysession/')[1]
+}
+
+/** From the logged-out home screen: starts a session as a guest, returns the packed key from the URL. */
+export async function startSessionAsGuest(page: Page): Promise<string> {
+  await page.getByRole('button', { name: 'Start a session' }).click()
+  await expect(page).toHaveURL(/#\/session\//)
+  return page.url().split('#/session/')[1]
+}
+
+/** From an open SessionView: sends a message and waits for it to render as your own bubble. */
+export async function sendMessage(page: Page, text: string): Promise<void> {
+  await page.getByPlaceholder('Message…').fill(text)
+  await page.getByRole('button', { name: 'Send' }).click()
+  await expect(page.locator('.bubble.mine')).toContainText(text, { timeout: RENDER_TIMEOUT })
+}
+
+/** From an open SessionView: waits for a message (any sender) to appear in the thread. */
+export async function expectMessageVisible(page: Page, text: string): Promise<void> {
+  await expect(page.locator('.bubble').filter({ hasText: text }).first()).toBeVisible({ timeout: RENDER_TIMEOUT })
+}
+
+/** From an open SessionView: waits for a message to appear rendered as this viewer's own (no sender label). */
+export async function expectOwnMessageVisible(page: Page, text: string): Promise<void> {
+  await expect(page.locator('.bubble.mine').filter({ hasText: text }).first()).toBeVisible({ timeout: RENDER_TIMEOUT })
+}
+
+/**
+ * From an open SessionView: waits for a message rendered as someone else's,
+ * and asserts the sender label shown next to it — the resolved display name
+ * (a live username lookup, or the deterministic guest-name fallback), not
+ * the raw public key.
+ */
+export async function expectMessageSender(page: Page, text: string, expectedSenderName: string): Promise<void> {
+  const bubble = page.locator('.bubble.theirs').filter({ hasText: text }).first()
+  await expect(bubble).toBeVisible({ timeout: RENDER_TIMEOUT })
+  await expect(bubble.locator('.sender')).toHaveText(expectedSenderName)
+}
+
+/** From a guest SessionView: opens the personal-link warning panel and returns the link. */
+export async function getPersonalLink(page: Page): Promise<string> {
+  await page.getByRole('button', { name: '⚠ Warning' }).click()
+  const input = page.locator('.warning-block input[readonly]')
+  await expect(input).toBeVisible()
+  return input.inputValue()
+}
+
+/** From an open SessionView: generates/reads a join link via the Invite menu. */
+export async function getJoinLink(page: Page): Promise<string> {
+  await page.getByRole('button', { name: 'Invite ▾' }).click()
+  await page.getByRole('button', { name: 'By join link' }).click()
+  const input = page.locator('.modal-box input[readonly]')
+  await expect(input).not.toHaveValue('Generating…')
+  const link = await input.inputValue()
+  await page.getByRole('button', { name: 'Close' }).click()
+  return link
+}
+
+/** From an open SessionView: sends a public-key invite to the given (packed) public key blob. */
+export async function sendInviteByKey(page: Page, publicKeyBlob: string): Promise<void> {
+  await page.getByRole('button', { name: 'Invite ▾' }).click()
+  await page.getByRole('button', { name: 'By public key' }).click()
+  await page.getByPlaceholder('Paste their public key').fill(publicKeyBlob)
+  await page.getByRole('button', { name: 'Send invite' }).click()
+  await expect(page.getByText('Invite sent to')).toBeVisible()
+  await page.getByRole('button', { name: 'Close' }).click()
+}
+
+/** From AccountHome: opens the Account menu's "My public key" panel and returns the blob. */
+export async function getMyPublicKey(page: Page): Promise<string> {
+  await page.getByRole('button', { name: 'Account ▾' }).click()
+  await page.getByRole('button', { name: 'My public key' }).click()
+  const input = page.locator('.modal-box input[readonly]')
+  await expect(input).toBeVisible()
+  const key = await input.inputValue()
+  await page.getByRole('button', { name: 'Close' }).click()
+  return key
+}
+
+/**
+ * From AccountHome: reloads (checkForInvites only runs on mount, so a
+ * pending invite sent after the page last loaded needs a fresh mount to
+ * surface) and accepts the first pending invite. Returns the sessionId.
+ */
+export async function acceptPendingInvite(page: Page): Promise<string> {
+  await page.reload()
+  const acceptButton = page.getByRole('button', { name: 'Accept' })
+  await expect(acceptButton).toBeVisible({ timeout: RENDER_TIMEOUT })
+  await acceptButton.click()
+  await expect(page).toHaveURL(/#\/mysession\//)
+  return page.url().split('#/mysession/')[1]
+}
+
+/** Navigates to a join link and joins as a throwaway guest. Returns the packed key from the URL. */
+export async function joinAsGuestViaLink(page: Page, joinLink: string): Promise<string> {
+  await page.goto(joinLink)
+  await page.getByRole('button', { name: 'Join as guest' }).click()
+  await expect(page).toHaveURL(/#\/session\//)
+  return page.url().split('#/session/')[1]
+}
+
+/** From AccountHome: adopts a guest identity (by its personal link or bare key) via the Account menu. */
+export async function adoptGuestFromAccountSide(page: Page, guestPersonalLinkOrKey: string): Promise<void> {
+  await page.getByRole('button', { name: 'Account ▾' }).click()
+  await page.getByRole('button', { name: 'Adopt guest account' }).click()
+  await page.getByPlaceholder('Paste their private key or personal link').fill(guestPersonalLinkOrKey)
+  await page.getByRole('button', { name: 'Adopt account' }).click()
+  // The modal closes itself on success (showAdoptModal.value = false) — its
+  // input disappearing is the confirmation, there's no separate success text.
+  await expect(page.getByPlaceholder('Paste their private key or personal link')).toHaveCount(0)
+}
+
+/** From a guest SessionView: merges this guest identity into an account via "+ Add to account". */
+export async function addToAccountFromGuestSide(page: Page, accountLinkOrKey: string): Promise<void> {
+  await page.getByRole('button', { name: '+ Add to account' }).click()
+  await page.getByPlaceholder('Paste your account link').fill(accountLinkOrKey)
+  await page.getByRole('button', { name: 'Log in & add' }).click()
+  await expect(page).toHaveURL(/#\/mysession\//)
+}

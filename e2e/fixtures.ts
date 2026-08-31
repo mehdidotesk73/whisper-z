@@ -3,25 +3,40 @@
 // what it created so this file can clean it up afterward — the test itself
 // only ever needs to call `manifest.track(packedPrivateKey)` once per
 // identity it brings into existence (an account, a guest, an admin — same
-// call either way).
-//
-// Cleanup doesn't need a table-by-table log of every insert: `session-access`
-// is looked up by a tag derived from the identity's own private key, and the
-// row it finds decrypts to the sessionId it belongs to. So a single packed
-// private key is enough to walk back to everything that identity is
-// connected to and delete it — see cleanupIdentity below.
+// call either way), plus `trackJoinAccess`/`trackInvite` for the two things
+// an identity's own key can't walk back to on its own (see below).
 import { test as base } from '@playwright/test'
-import { importPrivateKey, unpackJwk, deriveLookupTag, openSealed } from '../src/lib/crypto'
+import {
+  importPrivateKey,
+  unpackJwk,
+  deriveLookupTag,
+  openSealed,
+  publicJwkFromPrivateJwk,
+  canonicalPublicKeyId,
+  importPublicKey,
+  derivePairwiseSecret,
+  derivePairwiseTag,
+} from '../src/lib/crypto'
 import { supabase } from '../src/api/supabase'
 import { toEnvelope } from '../src/api/sessions'
+import { extractPackedKey } from '../src/lib/route'
 
 export interface TestManifest {
-  /** Register a packed private key (from a personal/account link) for cleanup once the test ends. */
-  track(packedPrivateKey: string): void
+  /**
+   * Register an identity for cleanup once the test ends — a bare packed
+   * private key, or a full personal/account link (anything
+   * `extractPackedKey` already knows how to read).
+   */
+  track(packedKeyOrLink: string): void
+  /** Register a join link's joinId (the `#/join/<joinId>/<secret>` segment) for cleanup. */
+  trackJoinAccess(joinId: string): void
+  /** Register a public-key invite for cleanup — pass both sides' packed private keys, in either order. */
+  trackInvite(packedPrivateKeyA: string, packedPrivateKeyB: string): void
 }
 
-async function cleanupIdentity(packedPrivateKey: string): Promise<void> {
-  const privateKey = await importPrivateKey(unpackJwk(packedPrivateKey))
+async function cleanupIdentity(packedKeyOrLink: string): Promise<void> {
+  const jwk = unpackJwk(extractPackedKey(packedKeyOrLink))
+  const privateKey = await importPrivateKey(jwk)
   const ownerTag = await deriveLookupTag(privateKey, 'session-access')
 
   const { data: rows } = await supabase.from('session_access').select('*').eq('owner_tag', ownerTag)
@@ -44,14 +59,60 @@ async function cleanupIdentity(packedPrivateKey: string): Promise<void> {
   // docs/system-design.md before assuming any other table cascades too.
   if (sessionIds.length) await supabase.from('sessions').delete().in('id', sessionIds)
   if (accessRowIds.length) await supabase.from('session_access').delete().in('id', accessRowIds)
+
+  // A guest identity never has an `accounts` row, so this is a harmless
+  // no-op delete for every guest key tracked — cheaper than tracking
+  // separately which identities are accounts.
+  const publicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(jwk))
+  await supabase.from('accounts').delete().eq('public_key', publicKeyId)
+}
+
+async function cleanupJoinAccess(joinId: string): Promise<void> {
+  await supabase.from('join_access').delete().eq('id', joinId)
+}
+
+async function cleanupInvite(packedPrivateKeyA: string, packedPrivateKeyB: string): Promise<void> {
+  // session_invites is looked up by a tag derived from a pairwise ECDH
+  // secret (src/api/inviteActions.ts) — computable from either side's
+  // private key plus the other's public key, same as the app itself does.
+  const privateKeyA = await importPrivateKey(unpackJwk(extractPackedKey(packedPrivateKeyA)))
+  const jwkB = unpackJwk(extractPackedKey(packedPrivateKeyB))
+  const publicKeyB = await importPublicKey(publicJwkFromPrivateJwk(jwkB))
+  const secret = await derivePairwiseSecret(privateKeyA, publicKeyB)
+  const tag = await derivePairwiseTag(secret, 'session-invite-tag')
+  await supabase.from('session_invites').delete().eq('tag', tag)
 }
 
 export const test = base.extend<{ manifest: TestManifest }>({
   manifest: async ({}, use) => {
-    const tracked = new Set<string>()
-    await use({ track: (key) => tracked.add(key) })
+    const trackedKeys = new Set<string>()
+    const trackedJoinIds = new Set<string>()
+    const trackedInvitePairs: [string, string][] = []
 
-    for (const key of tracked) {
+    await use({
+      track: (key) => trackedKeys.add(key),
+      trackJoinAccess: (joinId) => trackedJoinIds.add(joinId),
+      trackInvite: (a, b) => trackedInvitePairs.push([a, b]),
+    })
+
+    // Order matters a little: invites and join links first (independent of
+    // anything else), then identities last (which is what tears down the
+    // sessions those links/invites pointed at).
+    for (const [a, b] of trackedInvitePairs) {
+      try {
+        await cleanupInvite(a, b)
+      } catch (err) {
+        console.warn(`e2e cleanup failed for one tracked invite: ${err}`)
+      }
+    }
+    for (const joinId of trackedJoinIds) {
+      try {
+        await cleanupJoinAccess(joinId)
+      } catch (err) {
+        console.warn(`e2e cleanup failed for one tracked join link: ${err}`)
+      }
+    }
+    for (const key of trackedKeys) {
       try {
         await cleanupIdentity(key)
       } catch (err) {

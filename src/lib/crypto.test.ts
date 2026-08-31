@@ -20,6 +20,12 @@ import {
   unpackJwk,
   bytesToUrlSafe,
   urlSafeToBytes,
+  generateAdminSigningKeyPair,
+  importEcdsaPublicKey,
+  importEcdsaPrivateKey,
+  signData,
+  verifySignature,
+  derivePersonalSigningKeyPair,
 } from './crypto'
 
 describe('publicJwkFromPrivateJwk + canonicalPublicKeyId', () => {
@@ -169,5 +175,80 @@ describe('packJwk / unpackJwk and byte encoding round trips', () => {
     const packed = bytesToUrlSafe(bytes)
     expect(packed).not.toMatch(/[+/=]/)
     expect(urlSafeToBytes(packed)).toEqual(bytes)
+  })
+})
+
+describe('signData / verifySignature', () => {
+  it('a freshly generated admin signing keypair signs and verifies', async () => {
+    const pair = await generateAdminSigningKeyPair()
+    const signature = await signData(pair.privateKey, 'hello world')
+    await expect(verifySignature(pair.publicKey, signature, 'hello world')).resolves.toBe(true)
+  })
+
+  it('rejects a tampered message', async () => {
+    const pair = await generateAdminSigningKeyPair()
+    const signature = await signData(pair.privateKey, 'hello world')
+    await expect(verifySignature(pair.publicKey, signature, 'goodbye world')).resolves.toBe(false)
+  })
+
+  it('rejects a signature from an impostor key', async () => {
+    const real = await generateAdminSigningKeyPair()
+    const impostor = await generateAdminSigningKeyPair()
+    const signature = await signData(impostor.privateKey, 'hello world')
+    await expect(verifySignature(real.publicKey, signature, 'hello world')).resolves.toBe(false)
+  })
+
+  it('round-trips a generated keypair through JWK export/import', async () => {
+    const pair = await generateAdminSigningKeyPair()
+    const privateJwk = await exportPrivateKey(pair.privateKey)
+    const publicJwk = await exportPublicKey(pair.publicKey)
+    const importedPrivate = await importEcdsaPrivateKey(privateJwk)
+    const importedPublic = await importEcdsaPublicKey(publicJwk)
+
+    const signature = await signData(importedPrivate, 'hello world')
+    await expect(verifySignature(importedPublic, signature, 'hello world')).resolves.toBe(true)
+  })
+})
+
+describe('derivePersonalSigningKeyPair', () => {
+  it('derives a signing key that signs and verifies against its own exported public half', async () => {
+    const identity = await generateKeyPair()
+    const signingKey = await derivePersonalSigningKeyPair(identity.privateKey)
+
+    const signature = await signData(signingKey, 'a message')
+    const exported = await exportPrivateKey(signingKey) // includes the browser-computed x/y — see crypto.ts's comment on the PKCS8 trick
+    const publicKey = await importEcdsaPublicKey(publicJwkFromPrivateJwk(exported))
+
+    await expect(verifySignature(publicKey, signature, 'a message')).resolves.toBe(true)
+  })
+
+  it('is stable for the same identity and purpose', async () => {
+    const identity = await generateKeyPair()
+    const first = await derivePersonalSigningKeyPair(identity.privateKey)
+    const second = await derivePersonalSigningKeyPair(identity.privateKey)
+
+    expect(await exportPrivateKey(first)).toEqual(await exportPrivateKey(second))
+  })
+
+  it('differs across identities', async () => {
+    const a = await generateKeyPair()
+    const b = await generateKeyPair()
+    const signingA = await derivePersonalSigningKeyPair(a.privateKey)
+    const signingB = await derivePersonalSigningKeyPair(b.privateKey)
+
+    expect(await exportPrivateKey(signingA)).not.toEqual(await exportPrivateKey(signingB))
+  })
+
+  it("a signature from one identity's derived key does not verify against another's", async () => {
+    const a = await generateKeyPair()
+    const b = await generateKeyPair()
+    const signingA = await derivePersonalSigningKeyPair(a.privateKey)
+    const signingB = await derivePersonalSigningKeyPair(b.privateKey)
+
+    const signature = await signData(signingA, 'a message')
+    const exportedB = await exportPrivateKey(signingB)
+    const publicB = await importEcdsaPublicKey(publicJwkFromPrivateJwk(exportedB))
+
+    await expect(verifySignature(publicB, signature, 'a message')).resolves.toBe(false)
   })
 })

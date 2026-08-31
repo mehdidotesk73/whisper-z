@@ -3,12 +3,19 @@
 // Everything here builds on two native Web Crypto primitives — ECDH (P-256)
 // for key agreement and AES-GCM for authenticated encryption — reused for
 // every purpose in the app: message content, sealed per-identity envelopes,
-// and session-key wrapping. No custom elliptic-curve math, no hand-rolled
-// AEAD. See docs/system-design.md §3 for how these compose into the session
-// model, and docs/experience.md for the design rationale.
+// and session-key wrapping. No hand-rolled elliptic-curve math, no
+// hand-rolled AEAD. The one exception is `derivePersonalSigningKeyPair`
+// below, which uses `@noble/curves` (a small, widely-used, audited library)
+// for exactly the one operation native WebCrypto has no way to do at all:
+// computing a public key from an arbitrary raw scalar — see that function's
+// own comment for why. See docs/system-design.md §3 for how these compose
+// into the session model, and docs/experience.md for the design rationale.
+import { p256 } from '@noble/curves/nist.js'
 
 const ECDH_PARAMS: EcKeyImportParams | EcKeyGenParams = { name: 'ECDH', namedCurve: 'P-256' }
+const ECDSA_PARAMS: EcKeyImportParams | EcKeyGenParams = { name: 'ECDSA', namedCurve: 'P-256' }
 const AES_PARAMS = { name: 'AES-GCM', length: 256 }
+const P256_ORDER = BigInt('0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551')
 
 export async function generateKeyPair(): Promise<CryptoKeyPair> {
   return crypto.subtle.generateKey(ECDH_PARAMS, true, ['deriveKey', 'deriveBits']) as Promise<CryptoKeyPair>
@@ -139,6 +146,131 @@ export async function openSealed<T>(envelope: SealedEnvelope, recipientPrivateKe
   return JSON.parse(json) as T
 }
 
+// --- Signing (ECDSA P-256) ---------------------------------------------------
+// Two different origins for a signing keypair, for two different reasons —
+// see docs/system-design.md §3's "Stage E" entry for the full rationale.
+//
+// 1. An admin signing keypair is freshly GENERATED, once, at session
+//    creation — same reasoning as the admin ECDH keypair (generateKeyPair
+//    above, reused as-is): a session's admin authority must be a property of
+//    that session, not derivable from anything about the creator's real
+//    identity.
+// 2. Every identity's own personal signing keypair is DERIVED from its
+//    existing ECDH private key, not generated independently — see
+//    derivePersonalSigningKeyPair below.
+//
+// Both produce an ordinary ECDSA CryptoKey; signData/verifySignature work on
+// either without caring which.
+
+export async function generateAdminSigningKeyPair(): Promise<CryptoKeyPair> {
+  return crypto.subtle.generateKey(ECDSA_PARAMS, true, ['sign', 'verify']) as Promise<CryptoKeyPair>
+}
+
+/** Strips key_ops for the same reason importPrivateKey does — publicJwkFromPrivateJwk sets it to [], which mismatches a ['verify'] usage request. */
+export async function importEcdsaPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
+  const { key_ops: _key_ops, ...rest } = jwk
+  return crypto.subtle.importKey('jwk', rest, ECDSA_PARAMS, true, ['verify'])
+}
+
+/** Same key_ops-stripping as importPrivateKey above — this app's own exports are the only source, so it's safe to relax on our own read path. */
+export async function importEcdsaPrivateKey(jwk: JsonWebKey): Promise<CryptoKey> {
+  const { key_ops: _key_ops, ...rest } = jwk
+  return crypto.subtle.importKey('jwk', rest, ECDSA_PARAMS, true, ['sign'])
+}
+
+export async function signData(privateKey: CryptoKey, data: string): Promise<string> {
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, new TextEncoder().encode(data))
+  return bufToBase64(sig)
+}
+
+export async function verifySignature(publicKey: CryptoKey, signature: string, data: string): Promise<boolean> {
+  return crypto.subtle.verify(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    publicKey,
+    base64ToBuf(signature),
+    new TextEncoder().encode(data),
+  )
+}
+
+// --- Personal signing keypair, derived rather than generated -----------------
+// A message's `sender` field is otherwise just a self-reported string with
+// nothing binding it to the identity it names — any participant holding the
+// shared session key could write a message claiming to be anyone else. This
+// closes that: every identity gets a signing keypair derived from its
+// existing ECDH private key (SHA-256(ecdhPrivateKeyBytes || purpose), reduced
+// mod the curve order, used directly as the ECDSA private scalar) rather than
+// generated independently — see docs/system-design.md §3 for why deriving
+// matters (a personal/account/guest link only ever carries one private key;
+// generating a second, independent signing key would mean the link needs to
+// carry two just to be that identity somewhere new).
+//
+// WebCrypto has no "compute a public key from a raw scalar" operation — it
+// only generates fresh random keypairs, or imports ones where the public
+// point is already known and gets checked for consistency with the private
+// scalar. An earlier version of this function exploited PKCS8's ECPrivateKey
+// structure (RFC 5915) having an OPTIONAL public-key field, on the theory
+// that importing one with that field omitted would make the browser derive
+// and attach the matching public key itself — verified against real Chromium
+// before shipping, but **confirmed broken on real iOS Safari** the first time
+// this ran on the user's own device (`DataError: Data provided to an
+// operation does not meet requirements` — the literal error WebKit throws for
+// this, independently documented in @noble/curves' own source for the same
+// reason). Safari and Firefox both require the public point to already be
+// present; Chromium's tolerance of its absence turned out to be the
+// exception, not the rule. See "Deriving an ECDSA Keypair From a Raw Scalar"
+// in docs/experience.md for the full story.
+//
+// The fix: compute the public point ourselves with `@noble/curves`'s pure-JS
+// P-256 implementation (audited, widely used, no WebCrypto involved for this
+// one step), then import a fully self-consistent `{x, y, d}` JWK through
+// WebCrypto's ordinary, universally-supported private-key import path — the
+// same path every EC private key in this app already goes through elsewhere.
+// This isn't hand-rolled elliptic-curve math; it's a vetted library used for
+// exactly the one operation native WebCrypto has no way to do at all.
+const PERSONAL_SIGNING_PURPOSE = 'personal-signing'
+
+function reduceModOrder(digest: Uint8Array, order: bigint): bigint {
+  let n = 0n
+  for (const byte of digest) n = (n << 8n) | BigInt(byte)
+  n = n % order
+  return n === 0n ? 1n : n // 0 isn't a valid private scalar; astronomically unlikely, defensive only
+}
+
+function bigIntToFixedBytes(value: bigint, length: number): Uint8Array {
+  const bytes = new Uint8Array(length)
+  let n = value
+  for (let i = length - 1; i >= 0; i--) {
+    bytes[i] = Number(n & 0xffn)
+    n >>= 8n
+  }
+  return bytes
+}
+
+export async function derivePersonalSigningKeyPair(ecdhPrivateKey: CryptoKey): Promise<CryptoKey> {
+  const jwk = await exportPrivateKey(ecdhPrivateKey)
+  const scalar = base64ToBuf(urlSafeBase64ToStandard(jwk.d!))
+  const purposeBytes = new TextEncoder().encode(PERSONAL_SIGNING_PURPOSE)
+  const input = new Uint8Array(scalar.byteLength + purposeBytes.length)
+  input.set(new Uint8Array(scalar), 0)
+  input.set(purposeBytes, scalar.byteLength)
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', input))
+
+  const derivedScalar = bigIntToFixedBytes(reduceModOrder(digest, P256_ORDER), 32)
+  const uncompressedPoint = p256.getPublicKey(derivedScalar, false) // 0x04 || x(32) || y(32)
+  const x = uncompressedPoint.slice(1, 33)
+  const y = uncompressedPoint.slice(33, 65)
+
+  const derivedJwk: JsonWebKey = {
+    kty: 'EC',
+    crv: 'P-256',
+    x: bufToBase64(x.buffer).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+    y: bufToBase64(y.buffer).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+    d: bufToBase64(derivedScalar.buffer).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+    ext: true,
+  }
+  return crypto.subtle.importKey('jwk', derivedJwk, ECDSA_PARAMS, true, ['sign'])
+}
+
 // --- Join secrets ------------------------------------------------------------
 // A join link's secret is 32 random bytes used directly as a raw AES-256 key
 // — both the creator (encrypting) and anyone who follows the link
@@ -172,6 +304,18 @@ export async function deriveLookupTag(privateKey: CryptoKey, purpose: string): P
   input.set(new TextEncoder().encode(purpose), scalar.byteLength)
   const digest = await crypto.subtle.digest('SHA-256', input)
   return bufToBase64(digest)
+}
+
+/**
+ * A capability (Stage E) is the exact same one-way derivation deriveLookupTag
+ * already does — SHA-256(privateKey || purpose) — aliased under its own name
+ * because here the result IS the usable secret being granted, not a value
+ * used to search a table. Admin derives any capability on demand from
+ * adminEcdhPrivateKey and never stores one; see docs/system-design.md §3's
+ * "Stage E" entry for the full capability-grant design.
+ */
+export async function deriveCapability(adminEcdhPrivateKey: CryptoKey, purpose: string): Promise<string> {
+  return deriveLookupTag(adminEcdhPrivateKey, purpose)
 }
 
 // --- Pairwise discoverable secrets (session invites) -------------------------

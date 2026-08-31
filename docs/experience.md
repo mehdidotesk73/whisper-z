@@ -138,6 +138,161 @@ identify a P-256 key — used at every identity-string call site. Verified with 
 the exact field-order mismatch before touching the app, then a 3-participant simulation after the
 fix. Lesson: never compare two JWKs (or their JSON) for identity; compare their key material.
 
+### Deriving an ECDSA Keypair From a Raw Scalar
+
+Stage E's admin/capability design (`docs/system-design.md` §3) calls for every identity to get a
+personal signing keypair *derived* from its existing ECDH private key — not generated independently,
+so a personal/account/guest link never needs to carry a second key. The private half is easy: hash
+the ECDH private scalar with a purpose string, reduce mod the curve order, done. The public half is
+the actual problem: WebCrypto has no "compute a public key from a raw scalar" operation. It only
+generates a fresh random keypair, or imports one where the public point is already known (and gets
+checked for consistency with the private scalar on import).
+
+**First attempt, since abandoned:** exploit an OPTIONAL field in PKCS8's `ECPrivateKey` structure
+(RFC 5915) — `[1] publicKey` isn't required. Hand-build a minimal DER PKCS8 envelope carrying only
+the private scalar, with that field omitted, and `importKey('pkcs8', ...)` derives and attaches the
+matching public key itself — no elliptic-curve math written by hand, no new dependency. Verified with
+a standalone script against real Chromium before writing any app code: import succeeded, the key
+signed, the exported public half correctly verified that signature. Documented at the time as a real,
+unconfirmed risk on Safari/WebKit specifically, since this sandbox has no way to test an actual iPhone
+— "different engines can legitimately differ here, the omitted-public-key behavior is a convenience
+the spec allows, not one it mandates."
+
+**That risk was confirmed the first time this ran on the user's own iPhone.** Starting a session threw
+`DataError: Data provided to an operation does not meet requirements` — the message is not generic;
+it's the literal string WebKit (and Firefox) throw for exactly this case, independently documented in
+`@noble/curves`' own source (its `webcrypto.js` wrapper, in a comment on its own "raw" private-key
+import path): *"Chrome, node, bun, deno: works. Safari, Firefox: Data provided to an operation does
+not meet requirements."* Chromium's tolerance of the missing public-key field was the exception, not
+the rule — exactly the possibility flagged, now settled as fact rather than an open risk.
+
+**The fix: compute the public point in pure JS instead of asking WebCrypto to infer it.**
+`@noble/curves/nist.js`'s `p256.getPublicKey(scalarBytes, false)` returns the uncompressed SEC1 point
+(`0x04 || x || y`) via real elliptic-curve scalar multiplication — audited library code, not hand-rolled
+math, doing the one thing native WebCrypto has no operation for at all. With `x`/`y` in hand, build a
+complete, self-consistent `{kty, crv, x, y, d}` JWK and import it through WebCrypto's ordinary private-
+key path — the same shape (and the same `importKey('jwk', ...)` call) every other EC private key in
+this app already goes through. This isn't a corner case any implementation might reasonably skip; it's
+the textbook way to import an EC key, verified via Node's own WebCrypto (a different engine than
+Chromium, sharing nothing but spec compliance) before shipping. Real on-device Safari confirmation is
+still the only way to know for certain — ask for it again after this change deploys — but there is no
+known implementation that rejects a complete, correctly-computed JWK the way WebKit rejected the
+omitted-public-key PKCS8 shape.
+
+**Lesson underneath the crypto:** the two options weighed originally — the native trick with a
+real-device check afterward, or a small audited library up front — were both reasonable, and the
+"zero new dependencies" native option was chosen first specifically because it was cheaper *if it
+worked*. It didn't, and the fallback plan existed and was followed through exactly because it had been
+named in advance rather than invented under pressure once the failure showed up.
+
+### Signing Is Opportunistic, Not Yet Enforced
+
+Stage E signs every new session_log message with the sender's derived personal signing key, and
+`SessionView.vue` verifies incoming ones against the signer's signing key (published in their
+`session_participants` row). But this app already has real deployed data — existing sessions, real
+message history, real `session_participants` rows written before any of this existed. Retroactively
+requiring a signature would have silently deleted a user's own message history the moment this
+shipped (no signature exists to check, no signing key was ever published for the sender).
+
+So the rollout is deliberately soft: a message with no `kind`/`signature` at all (the shape every
+message had before this feature) is still rendered and trusted, exactly as it always was — nothing
+here retroactively distrusts history it can't verify. A new-shape message whose signature fails to
+verify against its claimed sender's *known* signing key is dropped (the actual forgery case this
+closes). A sender with no known signing key yet — a legacy participant row, or a race with someone
+who only just joined — renders unverified rather than being dropped.
+
+**The gap this leaves:** during the transition, a participant holding the shared session key can
+still forge another's `sender` by simply omitting `kind`/`signature` and falling back to the old,
+unsigned shape — the session itself has no way to force every client to use the new one. Closing this
+for real needs either a flag day (reject any message missing a valid signature once enough time has
+passed that no legitimate unsigned traffic remains) or an explicit per-session "signing required"
+flag set once every participant is known to be on a client that signs. Neither is built yet; this is
+an honestly-labeled best-effort improvement, not a hard guarantee — same spirit as this project's
+other documented gaps (see `docs/TODO.md`'s Code section: no forward secrecy, no out-of-band key
+verification).
+
+### A New Participant's Name Never Resolved Because Nothing Ever Asked
+
+Stage E's grant panel (`SessionView.vue`) lists other participants by name via the same `nameFor` /
+`resolveName` pair the thread already uses for message senders. The first CI run of its E2E test
+timed out waiting for a just-joined member's username to appear in that list — consistently, on both
+the original attempt and its retry, ruling out a flake. First suspicion was `subscribeParticipants`'s
+realtime channel never having been exercised before (`subscribeSessionAccess` is also still-unused
+dead code, and only `subscribeMessages` is proven to fire by every other test in this suite) — a
+plausible Postgres/Supabase-realtime-publication gap, so the panel was changed to pull-refresh
+participants via a plain `fetchParticipants` the moment it opens, independent of any subscription.
+
+**That fix was reasonable to keep but didn't touch the actual bug, and CI immediately proved it** —
+the exact same failure, unchanged, on the very next run. The real cause: `registerParticipantRow`
+(new this stage, feeding the grant panel's participant list) added a public-key id to
+`otherParticipantIds` but never called `resolveName` on it. `resolveName` is what triggers the
+`accounts` lookup and caches the result — nothing else does. A sender's name resolves correctly only
+because `decodeMessage` already calls `resolveName(plain.sender)` for every message it renders; a
+participant who hasn't sent a message yet (or been the subject of a grant, the only other call site)
+had no path to ever get its real username looked up, and `nameFor` silently fell back to
+`guestNameForKey`'s deterministic placeholder forever — exactly the mismatched name ("BlueLavenderJ8V"
+next to real usernames like "Mehdi" and "Ava") the user's own manual screenshot had already shown,
+which should have been the first clue. Fixed with one line: `registerParticipantRow` now calls
+`resolveName(parsed.publicKeyId)` itself, the same way every other path that displays a participant's
+name already does.
+
+**Lesson:** two consecutive fixes addressed at the same failing assertion, from a plausible-sounding
+infrastructure theory, before actually re-reading what the failing code path does end to end. The
+realtime-publication question is still open and worth checking eventually, but it was never what this
+particular failure was about — a `getByText(username)` timeout is exactly what "the name was never
+looked up" looks like, and that should have been checked before reaching for a database-configuration
+explanation.
+
+### A Session Message Tag's Name Was Baked In Before It Resolved
+
+Found by the user's own manual testing (not CI, which never caught it — see why below): "Ava can now
+send invites" rendered correctly in a session with prior message history, but the exact same kind of
+tag, in a brand-new session, rendered as "YellowZinniaZKV can now send invites" — the deterministic
+guest-style placeholder, not the real username, on *both* the granter's and the grantee's own screens.
+
+`resolveName(id)` (`SessionView.vue`) is fire-and-forget by design: it sets the guest-style placeholder
+into `participantNames` *synchronously* (also acting as a re-fetch guard), then updates it to the real
+`accounts` username once an async lookup resolves, later. A bubble's sender label reads this
+correctly because the template calls `nameFor(m.sender)` live, on every render — `participantNames`
+is a `reactive()` `Map`, so Vue's reactivity re-runs that expression the moment the async update lands.
+`handleCapabilityGrant`/`handleInviteSent`/`handleJoined`, though, called `resolveName` and then
+`nameFor` on the very next line, *inside* the decode function, and baked the result into a plain
+string stored in the `messages` array — permanently, if the real username hadn't arrived in that one
+synchronous instant. In a session with prior history, the name was already cached from an earlier
+message and happened to look correct; in a brand-new session, nothing had ever triggered the lookup
+before, so the placeholder froze in.
+
+**Why CI's own new test for this exact feature didn't catch it:** `grant-invite-capability.spec.ts`
+opens the "Grant access" panel before granting anything, and that panel's own participant list already
+triggers `resolveName` for everyone in it — so by the time the grant's tag rendered, the name was
+already cached, same as the "has history" case above. The bug only shows up when *nothing* has
+resolved that identity's name yet, which the test's own setup happened to rule out without meaning to.
+
+**Fix:** stop computing the tag's text at decode time. The `RenderedMessage` union's session-message-tag
+variants now carry the raw ids/facts (`granteePublicKeyId`, `capability`, etc.), and a new
+`sessionMessageTagText(m)` builds the display string at *render* time, called directly from the template —
+exactly the same pattern a bubble's sender label already used correctly. This isn't just a fix for the
+one symptom seen; it's the general rule anything resolving a name through this pattern needs to follow
+project-wide: never bake a `nameFor(...)` result into a value stored ahead of render, only ever call it
+live from somewhere Vue's reactivity is already re-running.
+
+**A second, deeper bug surfaced right after fixing the one above**, from the same round of manual
+testing, on a real mobile connection (2 bars, not wifi): the same public key resolved to its real
+username in one tag but stayed on its guest-style placeholder in another, on the *same* screen, even
+after the reactive fix — including a user failing to resolve their own name on their own screen. Since
+every tag reads from one shared reactive map, a key that resolves correctly anywhere should resolve
+everywhere; this wasn't the "baked in before render" bug again, it was `resolveName`'s one-shot guard
+(`if (participantNames.has(id)) return`) treating its own *attempt* as permanent settlement regardless
+of whether the attempt actually succeeded. `fetchAccountByPublicKey` returning nothing is genuinely
+ambiguous — "this really is a guest with no account" and "the request itself failed" (a dropped
+connection, exactly the kind a flaky mobile network produces) look identical from the caller's side —
+and the guard was permanently committing to the first reading the moment either one happened once.
+Fixed by changing the guard from "have I ever tried" to "do I already have a *real*, non-placeholder
+answer": a key stuck on its own placeholder gets retried every time something asks about it again
+(once per message or tag mentioning that identity), which self-heals a transient failure at near-zero
+cost, while a key that's already resolved to a real name is still never re-fetched. A true guest
+identity just keeps quietly failing the same lookup every time it's asked about, which is correct.
+
 ### Peer-Relay Cover Traffic to Hide the Session Graph — Rejected
 
 Prompted by a design review of exactly what this schema does and doesn't hide: content and identity
@@ -180,6 +335,16 @@ instance" — not something to bolt on here.
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)
+
+### v0.13.0 — 2026-08-31 (pull further skill updates from the template)
+- **Synced `.claude/skills/`** again (`update-skills`): adds the new `add-statefulness` skill, which
+  works out whether an app needs a database at all (vs. `localStorage`, a document, or realtime)
+  before committing to Supabase setup — `add-database` now assumes that decision was already made
+  and routes through it. `ship-feature` gained a one-time-per-session check for further skill drift
+  and a "consider unit tests" step that offers test-coverage bundles the same way the doc gate offers
+  doc surfaces. `update-skills` itself now correctly says a skill update takes effect only in a new
+  session with *this project's repo selected*, not just any new conversation — a real correction to
+  a previous version of this same skill's own closing message. No app code changed.
 
 ### v0.12.0 — 2026-08-31 (pull skill updates from the template)
 - **Synced `.claude/skills/`** with the template (`update-skills`): `add-database`, `finish-setup`,

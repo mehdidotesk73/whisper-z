@@ -2,7 +2,9 @@
 import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   importPrivateKey,
+  importPublicKey,
   publicJwkFromPrivateJwk,
+  publicKeyFromCanonicalId,
   canonicalPublicKeyId,
   deriveLookupTag,
   openSealed,
@@ -13,6 +15,11 @@ import {
   importJoinKey,
   bytesToUrlSafe,
   unpackJwk,
+  derivePersonalSigningKeyPair,
+  importEcdsaPublicKey,
+  importEcdsaPrivateKey,
+  signData,
+  verifySignature,
 } from '../lib/crypto'
 import {
   fetchSessionAccessForOwner,
@@ -24,13 +31,35 @@ import {
   createJoinAccess,
   unsubscribe,
   toEnvelope,
+  fetchParticipants,
+  subscribeParticipants,
+  type ParticipantRow,
+  type SessionAccessRow,
 } from '../api/sessions'
-import type { SessionAccessPayload, JoinPayload, DecodedMessage } from '../lib/sessionTypes'
+import type {
+  SessionAccessPayload,
+  JoinPayload,
+  DecodedMessage,
+  CapabilityGrantEntry,
+  InviteSentEntry,
+  JoinedEntry,
+  SessionLogEntry,
+} from '../lib/sessionTypes'
 import { copyToClipboard } from '../lib/clipboard'
 import { navigate, homeHash, joinHash, mySessionHash, parseHash, extractHash } from '../lib/route'
 import { currentAccount, loginWithPackedKey } from '../lib/auth'
 import { fetchAccountByPublicKey } from '../api/accounts'
-import { isIdentityMerged, migrateGuestSessionToAccount } from '../api/sessionActions'
+import {
+  isIdentityMerged,
+  migrateGuestSessionToAccount,
+  parseParticipantPayload,
+  hasCapability,
+  grantCapability,
+  acceptCapabilityGrant,
+  logInviteSent,
+  inviteSentSigningInput,
+  joinedSigningInput,
+} from '../api/sessionActions'
 import { createSessionInvite, rejectInvite } from '../api/inviteActions'
 import { guestNameForKey, truncateName } from '../lib/guestName'
 import { logDebug } from '../debug'
@@ -46,12 +75,20 @@ const props = defineProps<{ packedKey?: string; sessionId?: string }>()
 type Status = 'loading' | 'ready' | 'not-found'
 const status = ref<Status>('loading')
 
-interface RenderedMessage {
-  id: string
-  mine: boolean
-  sender: string
-  text: string
-}
+// A capability-grant entry renders as a centered session message tag, never a chat
+// bubble — see docs/system-design.md §3's "Stage E" entry ("kind decides
+// rendering").
+// A session-message-tag variant carries the raw ids/facts, not a pre-built display
+// string — resolveName's real-username fetch is async, so baking a name
+// into a fixed string at decode time can freeze in a not-yet-resolved
+// placeholder forever. sessionMessageTagText (below) computes the text at render
+// time instead, calling nameFor live so it stays in sync as names resolve —
+// exactly like a bubble's sender label already does.
+type RenderedMessage =
+  | { id: string; kind: 'message'; mine: boolean; sender: string; text: string }
+  | { id: string; kind: 'capability-grant'; granteePublicKeyId: string; capability: string }
+  | { id: string; kind: 'invite-sent'; sender: string; inviteePublicKeyId: string }
+  | { id: string; kind: 'joined'; sender: string; via: 'link' | 'invite' }
 
 const messages = ref<RenderedMessage[]>([])
 const draft = ref('')
@@ -80,7 +117,86 @@ let ownPrivateKey: CryptoKey | null = null
 // The identity used to SEND: a guest's one-off key, or an account's real
 // key (always — even for a migrated session, see onMounted below).
 let ownPublicKeyId = ''
-let ownRole: 'owner' | 'member' = 'member'
+let ownPublicKey: CryptoKey | null = null
+// The whole opened SessionAccessPayload for this route's identity — kept
+// around (not just the few fields destructured above) so migrateToAccount
+// and the invite builders below can forward Stage E's admin key fields
+// without re-fetching/re-opening anything. See sessionActions.ts's
+// migrateGuestSessionToAccount doc comment for why passing the whole
+// payload, not a narrower parameter list, matters.
+let ownAccessPayload: SessionAccessPayload | null = null
+// The raw row backing ownAccessPayload — needed for its `id`, the only
+// piece acceptCapabilityGrant needs beyond the payload itself, to self-write
+// a newly recovered capability back into this exact row.
+let ownAccessRow: SessionAccessRow | null = null
+// Reactive mirror of hasCapability(ownAccessPayload, 'invite') — the plain
+// `let` above isn't template-reactive, and this can change mid-session (a
+// grant arriving live), unlike everything else read from ownAccessPayload,
+// which is only ever consulted at the moment an action button is clicked.
+const canInvite = ref(false)
+// True only when this identity is both the owner AND actually holds admin
+// key material — a session created before Stage E has role 'owner' but no
+// admin keys at all, so role alone isn't enough to safely offer the Grant
+// button (see onMounted).
+const canGrant = ref(false)
+// Other participants seen so far (session_participants + anyone who's sent
+// a message), for the admin-only "grant invite access" panel — never
+// includes ownPublicKeyId. capabilityGrantsSeen tracks which of them
+// already hold 'invite', purely from watching capability-grant entries go
+// by in the log, so the panel doesn't offer to re-grant something already
+// granted.
+const otherParticipantIds = ref<string[]>([])
+const grantedCapabilities = reactive(new Map<string, Set<string>>()) // publicKeyId -> capabilities granted
+// A message sent from here on is signed with the sender's own personal
+// signing key (derived, not stored — see lib/crypto.ts) and verified against
+// the sender's signingPublicKey published in their session_participants
+// row. Populated from the initial participant fetch below and kept live via
+// subscribeParticipants; a sender with no entry here yet (a legacy
+// participant row, or a race with a very recently joined sender) is
+// rendered unverified rather than dropped — see "Signing Is Opportunistic,
+// Not Yet Enforced" in docs/experience.md for the honest limit that leaves.
+const participantSigningKeys = new Map<string, CryptoKey>()
+let participantChannel: RealtimeChannel | null = null
+
+/**
+ * A plain pull, not just a wait on subscribeParticipants' live push —
+ * called again right before showing the grant panel, since that's the one
+ * place staleness is directly visible to the admin (a member who joined
+ * moments ago missing from the list they're about to act on), and a fresh
+ * fetch is trivially correct regardless of whether this session's realtime
+ * event actually arrives promptly.
+ */
+async function refreshParticipants() {
+  for (const row of await fetchParticipants(activeSessionId)) await registerParticipantRow(row)
+}
+
+async function registerParticipantRow(row: Pick<ParticipantRow, 'ciphertext' | 'iv'>) {
+  if (!sessionKey) return
+  try {
+    const decrypted = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
+    const parsed = parseParticipantPayload(decrypted)
+    if (parsed.signingPublicKey) {
+      participantSigningKeys.set(parsed.publicKeyId, await importEcdsaPublicKey(parsed.signingPublicKey))
+    }
+    if (parsed.publicKeyId !== ownPublicKeyId && !otherParticipantIds.value.includes(parsed.publicKeyId)) {
+      otherParticipantIds.value.push(parsed.publicKeyId)
+      // Without this, a participant who hasn't sent a message yet (or been
+      // the subject of a grant — the only other place resolveName gets
+      // called) shows up here under its deterministic guest-style fallback
+      // name forever, never its real account username, since resolveName's
+      // account lookup only ever runs for a key it's actually been asked
+      // about.
+      resolveName(parsed.publicKeyId)
+    }
+  } catch {
+    // Not decryptable with this session's key — shouldn't happen, ignore.
+  }
+}
+
+/** Same field order at sign time and verify time — see signOutgoingMessage/decodeMessage below. */
+function messageSigningInput(sender: string, text: string, createdAt: string): string {
+  return JSON.stringify({ kind: 'message', sender, text, createdAt })
+}
 // Which sender keys count as "mine" for bubble styling — usually just
 // ownPublicKeyId, but a migrated session's account also privately
 // recognizes its old, pinned guest key as its own (see identityPublicKeyId
@@ -105,8 +221,19 @@ function nameFor(publicKeyId: string): string {
 }
 
 function resolveName(publicKeyId: string) {
-  if (participantNames.has(publicKeyId)) return
-  participantNames.set(publicKeyId, guestNameForKey(publicKeyId)) // instant placeholder, also guards re-fetching
+  const placeholder = guestNameForKey(publicKeyId)
+  // A cached value that's still exactly the placeholder means no account
+  // lookup has ever actually succeeded for this key yet — try again. A null
+  // result from fetchAccountByPublicKey means either "this really is a
+  // guest with no account" or "the request itself failed" (a dropped
+  // connection, a flaky mobile network), and those are indistinguishable
+  // from here; retrying on every call this key is asked about again (once
+  // per message/tag mentioning it) self-heals from the second case at
+  // near-zero cost, instead of permanently mistaking a transient failure
+  // for a settled "no account" answer the way a one-shot guard would.
+  const current = participantNames.get(publicKeyId)
+  if (current !== undefined && current !== placeholder) return // already resolved to a real account name
+  participantNames.set(publicKeyId, placeholder)
   fetchAccountByPublicKey(publicKeyId).then((account) => {
     if (account) participantNames.set(publicKeyId, account.username)
   })
@@ -120,22 +247,132 @@ async function scrollToBottom() {
   scrollAnchor.value?.scrollIntoView({ block: 'end' })
 }
 
-async function decodeMessage(row: { id: string; ciphertext: string; iv: string }): Promise<RenderedMessage | null> {
+/**
+ * Self-accepts a capability grant addressed to this identity (a no-op if it
+ * isn't), then renders the grant as a session message tag for everyone regardless —
+ * the grant itself is visible to and verifiable by the whole session, only
+ * the sealed secret inside it is private to the grantee. See
+ * sessionActions.ts's acceptCapabilityGrant and CapabilityGrantEntry's own
+ * doc comment.
+ */
+async function handleCapabilityGrant(id: string, entry: CapabilityGrantEntry): Promise<RenderedMessage> {
+  let existing = grantedCapabilities.get(entry.granteePublicKeyId)
+  if (!existing) {
+    existing = new Set()
+    grantedCapabilities.set(entry.granteePublicKeyId, existing)
+  }
+  existing.add(entry.capability)
+
+  if (
+    entry.granteePublicKeyId === ownPublicKeyId &&
+    ownAccessRow &&
+    ownAccessPayload &&
+    ownPrivateKey &&
+    ownPublicKey &&
+    !hasCapability(ownAccessPayload, entry.capability)
+  ) {
+    const updated = await acceptCapabilityGrant(
+      entry,
+      ownPublicKeyId,
+      ownPrivateKey,
+      ownPublicKey,
+      ownAccessRow,
+      ownAccessPayload,
+    )
+    if (updated) {
+      ownAccessPayload = updated
+      if (entry.capability === 'invite') canInvite.value = true
+    } else {
+      logDebug(`Could not accept capability grant ${id}: signature or seal did not check out`, 'warn')
+    }
+  }
+
+  resolveName(entry.granteePublicKeyId)
+  return { id, kind: 'capability-grant', granteePublicKeyId: entry.granteePublicKeyId, capability: entry.capability }
+}
+
+/**
+ * Shared opportunistic-verification policy for anything signed with a
+ * sender's personal signing key (messages, invite-sent, joined — everything
+ * except capability grants, which are admin-signed instead): a sender with
+ * no known signing key yet renders unverified rather than being dropped
+ * (see participantSigningKeys' doc comment above), but a signature that
+ * fails to verify against a key we DO know is a real forgery signal.
+ */
+async function verifyOpportunistic(sender: string, signature: string, input: string): Promise<boolean> {
+  const signingKey = participantSigningKeys.get(sender)
+  if (!signingKey) return true
+  return verifySignature(signingKey, signature, input)
+}
+
+async function handleInviteSent(id: string, entry: InviteSentEntry): Promise<RenderedMessage | null> {
+  const input = inviteSentSigningInput(entry)
+  if (!(await verifyOpportunistic(entry.sender, entry.signature, input))) {
+    logDebug(`Dropped invite-sent entry ${id}: signature did not verify for sender ${entry.sender}`, 'warn')
+    return null
+  }
+  resolveName(entry.sender)
+  resolveName(entry.inviteePublicKeyId)
+  return { id, kind: 'invite-sent', sender: entry.sender, inviteePublicKeyId: entry.inviteePublicKeyId }
+}
+
+async function handleJoined(id: string, entry: JoinedEntry): Promise<RenderedMessage | null> {
+  const input = joinedSigningInput(entry)
+  if (!(await verifyOpportunistic(entry.sender, entry.signature, input))) {
+    logDebug(`Dropped joined entry ${id}: signature did not verify for sender ${entry.sender}`, 'warn')
+    return null
+  }
+  resolveName(entry.sender)
+  return { id, kind: 'joined', sender: entry.sender, via: entry.via }
+}
+
+/** Computed at render time (template calls this live), not baked in at decode time — see RenderedMessage's doc comment for why that distinction matters. */
+function sessionMessageTagText(m: Extract<RenderedMessage, { kind: 'capability-grant' | 'invite-sent' | 'joined' }>): string {
+  if (m.kind === 'capability-grant') {
+    const name = nameFor(m.granteePublicKeyId)
+    return m.capability === 'invite' ? `${name} can now send invites` : `${name} was granted "${m.capability}" access`
+  }
+  if (m.kind === 'invite-sent') return `${nameFor(m.sender)} invited ${nameFor(m.inviteePublicKeyId)}`
+  return `${nameFor(m.sender)} joined by ${m.via === 'invite' ? 'invite' : 'join link'}`
+}
+
+async function decodeLogEntry(row: { id: string; ciphertext: string; iv: string }): Promise<RenderedMessage | null> {
   if (seenMessageIds.has(row.id) || !sessionKey) return null
   seenMessageIds.add(row.id)
   try {
     const json = await decryptText(sessionKey, { ciphertext: row.ciphertext, iv: row.iv })
-    const plain = JSON.parse(json) as DecodedMessage
+    const plain = JSON.parse(json) as SessionLogEntry
+
+    if (plain.kind === 'capability-grant') return await handleCapabilityGrant(row.id, plain)
+    if (plain.kind === 'invite-sent') return await handleInviteSent(row.id, plain)
+    if (plain.kind === 'joined') return await handleJoined(row.id, plain)
+
+    // A legacy message (sent before Stage E) has no kind/signature at all —
+    // still trusted, exactly as it always was; nothing here retroactively
+    // distrusts history it can't verify. A new-shape message with a
+    // signature that fails to verify against its claimed sender's known
+    // signing key IS dropped — that's the actual forgery case this closes.
+    // A sender with no known signing key yet (legacy participant row, or a
+    // race with a just-joined sender) renders unverified rather than being
+    // dropped — see participantSigningKeys' doc comment above.
+    if (plain.kind === 'message' && plain.signature) {
+      const input = messageSigningInput(plain.sender, plain.text, plain.createdAt)
+      if (!(await verifyOpportunistic(plain.sender, plain.signature, input))) {
+        logDebug(`Dropped message ${row.id}: signature did not verify for sender ${plain.sender}`, 'warn')
+        return null
+      }
+    }
+
     resolveName(plain.sender)
-    return { id: row.id, mine: myKeys.has(plain.sender), sender: plain.sender, text: plain.text }
+    return { id: row.id, kind: 'message', mine: myKeys.has(plain.sender), sender: plain.sender, text: plain.text }
   } catch (err) {
-    logDebug(`Could not decrypt message ${row.id}: ${err}`, 'warn')
+    logDebug(`Could not decrypt session_log entry ${row.id}: ${err}`, 'warn')
     return null
   }
 }
 
 async function decodeAndAppend(row: { id: string; ciphertext: string; iv: string }) {
-  const decoded = await decodeMessage(row)
+  const decoded = await decodeLogEntry(row)
   if (!decoded) return
   messages.value.push(decoded)
   scrollToBottom()
@@ -161,7 +398,7 @@ async function loadMore() {
     const older = await fetchMessagesInRange(activeSessionId, newWindowStart, windowStart.value)
     const decoded: RenderedMessage[] = []
     for (const row of older) {
-      const msg = await decodeMessage(row)
+      const msg = await decodeLogEntry(row)
       if (msg) decoded.push(msg)
     }
     messages.value.unshift(...decoded)
@@ -190,6 +427,7 @@ onMounted(async () => {
       const privateKeyJwk = unpackJwk(props.packedKey)
       privateKey = await importPrivateKey(privateKeyJwk)
       ownPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(privateKeyJwk))
+      ownPublicKey = await importPublicKey(publicJwkFromPrivateJwk(privateKeyJwk))
       myKeys = new Set([ownPublicKeyId])
     } else {
       status.value = 'not-found'
@@ -211,11 +449,13 @@ onMounted(async () => {
         const candidate = await openSealed<SessionAccessPayload>(toEnvelope(row), privateKey)
         if (candidate.sessionId === props.sessionId) {
           access = candidate
+          ownAccessRow = row
           break
         }
       }
     } else {
       access = await openSealed<SessionAccessPayload>(toEnvelope(rows[0]), privateKey)
+      ownAccessRow = rows[0]
     }
     if (!access) {
       status.value = 'not-found'
@@ -224,13 +464,22 @@ onMounted(async () => {
     activeSessionId = access.sessionId
     sessionKeyJwk = access.sessionKey
     sessionKey = await importSessionKey(access.sessionKey)
-    ownRole = access.role
+    ownAccessPayload = access
+    canInvite.value = hasCapability(access, 'invite')
+    // A session created before Stage E shipped has role 'owner' but no
+    // admin key material at all — "can grant" needs both, not just the
+    // role, or the button below would offer something that silently does
+    // nothing when clicked (the same class of bug as an earlier, unrelated
+    // modal issue this project already hit once).
+    canGrant.value = access.role === 'owner' && !!access.adminEcdhPrivateKey && !!access.adminSigningPrivateKey
+
     if (props.sessionId) {
       // Always send as the account's real key, even for a migrated session
       // — that's what lets new messages resolve to the account's live
       // username for everyone. The pinned identityPublicKeyId (if any) only
       // extends "mine" to also cover messages sent before migration.
       ownPublicKeyId = currentAccount.value!.publicKeyId
+      ownPublicKey = currentAccount.value!.publicKey
       myKeys = new Set([ownPublicKeyId, ...(access.identityPublicKeyIds ?? [])])
       sessionAliasKeys.value = access.identityPublicKeyIds ?? []
     } else if (currentAccount.value) {
@@ -241,6 +490,16 @@ onMounted(async () => {
       // from an unrelated direct join, without this guest visit being linked.
       migrated.value = await isIdentityMerged(currentAccount.value, activeSessionId, ownPublicKeyId)
     }
+
+    // Populate participantSigningKeys (and otherParticipantIds) before
+    // loading any messages below, so the very first render can verify
+    // signatures rather than treating everyone as "no known key yet." Must
+    // come after ownPublicKeyId is resolved above — registerParticipantRow
+    // filters "not me" against it, and until this point (for an
+    // account-backed route) it's still empty, which used to let the admin's
+    // own name leak into the "grant invite access" panel's participant list.
+    await refreshParticipants()
+    participantChannel = subscribeParticipants(activeSessionId, registerParticipantRow)
 
     windowStart.value = new Date(Date.now() - MESSAGE_PAGE_DAYS * 24 * 60 * 60 * 1000).toISOString()
     const existing = await fetchMessagesInRange(activeSessionId, windowStart.value, null)
@@ -257,15 +516,19 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (messageChannel) unsubscribe(messageChannel)
+  if (participantChannel) unsubscribe(participantChannel)
 })
 
 async function send() {
   const text = draft.value.trim()
-  if (!text || !sessionKey || sending.value) return
+  if (!text || !sessionKey || !ownPrivateKey || sending.value) return
 
   sending.value = true
   try {
-    const payload: DecodedMessage = { sender: ownPublicKeyId, text, createdAt: new Date().toISOString() }
+    const createdAt = new Date().toISOString()
+    const signingKey = await derivePersonalSigningKeyPair(ownPrivateKey)
+    const signature = await signData(signingKey, messageSigningInput(ownPublicKeyId, text, createdAt))
+    const payload: DecodedMessage = { kind: 'message', sender: ownPublicKeyId, text, createdAt, signature }
     const { ciphertext, iv } = await encryptText(sessionKey, JSON.stringify(payload))
     const ok = await sendMessage(activeSessionId, ciphertext, iv)
     if (ok) {
@@ -301,13 +564,18 @@ const inviteLink = ref('')
 const copiedInvite = ref(false)
 
 async function generateInvite() {
-  if (!sessionKeyJwk) return
+  if (!sessionKeyJwk || !canInvite.value) return
   copiedInvite.value = false
   inviteLink.value = ''
   try {
     const secretBytes = generateJoinSecret()
     const joinKey = await importJoinKey(secretBytes)
-    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+    const payload: JoinPayload = {
+      sessionId: activeSessionId,
+      sessionKey: sessionKeyJwk,
+      adminEcdhPublicKey: ownAccessPayload?.adminEcdhPublicKey,
+      adminSigningPublicKey: ownAccessPayload?.adminSigningPublicKey,
+    }
     const { ciphertext, iv } = await encryptText(joinKey, JSON.stringify(payload))
     const joinId = await createJoinAccess({ ciphertext, iv })
     if (!joinId) return
@@ -337,7 +605,7 @@ const lastInviteRecipient = ref('')
 const undoingInvite = ref(false)
 
 async function sendInviteByKey() {
-  if (!ownPrivateKey || !sessionKeyJwk) return
+  if (!ownPrivateKey || !sessionKeyJwk || !canInvite.value) return
   const pasted = inviteByKeyInput.value.trim()
   if (!pasted) return
 
@@ -345,13 +613,21 @@ async function sendInviteByKey() {
   inviteByKeyError.value = ''
   try {
     const targetPublicKeyJwk = unpackJwk(pasted)
-    const payload: JoinPayload = { sessionId: activeSessionId, sessionKey: sessionKeyJwk }
+    const payload: JoinPayload = {
+      sessionId: activeSessionId,
+      sessionKey: sessionKeyJwk,
+      adminEcdhPublicKey: ownAccessPayload?.adminEcdhPublicKey,
+      adminSigningPublicKey: ownAccessPayload?.adminSigningPublicKey,
+    }
     const created = await createSessionInvite(payload, ownPrivateKey, targetPublicKeyJwk)
     if (!created) {
       inviteByKeyError.value = 'Could not send the invite — try again.'
       return
     }
     lastInviteId.value = created.id
+    if (sessionKey) {
+      await logInviteSent(activeSessionId, sessionKey, ownPrivateKey, ownPublicKeyId, canonicalPublicKeyId(targetPublicKeyJwk))
+    }
     // The inviter already holds this exact key (they just pasted it), so
     // naming who it belongs to here reveals nothing new to anyone else.
     const targetAccount = await fetchAccountByPublicKey(canonicalPublicKeyId(targetPublicKeyJwk))
@@ -419,17 +695,11 @@ function toggleMigrate() {
 }
 
 async function migrateToAccount() {
-  if (!currentAccount.value || !sessionKeyJwk) return
+  if (!currentAccount.value || !ownAccessPayload) return
   migrating.value = true
   migrateError.value = ''
   try {
-    const ok = await migrateGuestSessionToAccount(
-      activeSessionId,
-      sessionKeyJwk,
-      ownRole,
-      ownPublicKeyId,
-      currentAccount.value,
-    )
+    const ok = await migrateGuestSessionToAccount(ownAccessPayload, ownPublicKeyId, currentAccount.value)
     if (!ok) {
       migrateError.value = 'Could not add this session to your account — try again.'
       return
@@ -483,6 +753,55 @@ function toggleAliases() {
   showAliases.value = opening
 }
 
+// Admin-only: grant another participant the 'invite' capability (Stage E).
+// Visible only when ownAccessPayload.role === 'owner' — see the template.
+const showGrant = ref(false)
+const grantingTo = ref<string | null>(null)
+const grantError = ref('')
+
+async function toggleGrant() {
+  const opening = !showGrant.value
+  closeAllPanels()
+  showGrant.value = opening
+  grantError.value = ''
+  if (opening) await refreshParticipants()
+}
+
+function hasBeenGrantedInvite(participantId: string): boolean {
+  return grantedCapabilities.get(participantId)?.has('invite') ?? false
+}
+
+async function grantInviteTo(participantId: string) {
+  if (!sessionKey || !ownAccessPayload?.adminEcdhPrivateKey || !ownAccessPayload.adminSigningPrivateKey) {
+    // canGrant being true should already guarantee this — a visible error
+    // rather than a silent no-op if it somehow doesn't, so a click never
+    // just appears to do nothing (see canGrant's doc comment in onMounted).
+    grantError.value = 'This session has no admin keys to grant with — it may predate this feature.'
+    return
+  }
+  grantingTo.value = participantId
+  grantError.value = ''
+  try {
+    const adminEcdhPrivateKey = await importPrivateKey(ownAccessPayload.adminEcdhPrivateKey)
+    const adminSigningPrivateKey = await importEcdsaPrivateKey(ownAccessPayload.adminSigningPrivateKey)
+    const granteePublicKeyJwk = publicKeyFromCanonicalId(participantId)
+    const ok = await grantCapability(
+      activeSessionId,
+      sessionKey,
+      adminEcdhPrivateKey,
+      adminSigningPrivateKey,
+      granteePublicKeyJwk,
+      'invite',
+    )
+    if (!ok) grantError.value = 'Could not send the grant — try again.'
+  } catch (err) {
+    logDebug(`grantInviteTo failed: ${err}`, 'error')
+    grantError.value = 'Could not send the grant — try again.'
+  } finally {
+    grantingTo.value = null
+  }
+}
+
 // Invite menu: a small popover offering the two ways to invite, each
 // opening its panel in a modal rather than inline. The popover itself is
 // MenuButton (see components/MenuButton.vue) — it owns closing itself and
@@ -506,6 +825,7 @@ function closeAllPanels() {
   showWarning.value = false
   showMigrate.value = false
   showAliases.value = false
+  showGrant.value = false
 }
 
 // Warning/Migrate are inline panels that actually live inside panelArea's
@@ -546,12 +866,15 @@ function goHome() {
         >
           Signed in as <strong>{{ currentAccount.account.username }}</strong>
         </span>
-        <MenuButton v-if="status === 'ready'" label="Invite ▾" tone="tone-blue" class="invite-menu-wrap">
+        <MenuButton v-if="status === 'ready' && canInvite" label="Invite ▾" tone="tone-blue" class="invite-menu-wrap">
           <template #default="{ select }">
             <button class="menu-item" @click="select(openInviteModal)">By join link</button>
             <button class="menu-item" @click="select(openInviteByKeyModal)">By public key</button>
           </template>
         </MenuButton>
+        <button v-if="status === 'ready' && canGrant" class="chip-ghost tone-neutral" @click.stop="toggleGrant">
+          Grant access ▾
+        </button>
       </div>
 
       <div class="top-bar">
@@ -639,6 +962,21 @@ function goHome() {
       </p>
     </Modal>
 
+    <Modal :open="showGrant" title="Grant invite access" @close="showGrant = false">
+      <p class="hint">Let someone else in this session send invites too, without giving them full admin.</p>
+      <ul v-if="otherParticipantIds.length" class="alias-list">
+        <li v-for="id in otherParticipantIds" :key="id" class="grant-row">
+          <span>{{ nameFor(id) }}</span>
+          <span v-if="hasBeenGrantedInvite(id)" class="hint">Already granted</span>
+          <button v-else class="new-link" :disabled="grantingTo === id" @click="grantInviteTo(id)">
+            {{ grantingTo === id ? 'Granting…' : 'Grant invite access' }}
+          </button>
+        </li>
+      </ul>
+      <p v-else class="hint">No one else has joined this session yet.</p>
+      <p v-if="grantError" class="error">{{ grantError }}</p>
+    </Modal>
+
     <p v-if="status === 'loading'" class="status">Loading…</p>
     <p v-else-if="status === 'not-found'" class="status error">
       This session doesn't exist — check the link you followed.
@@ -652,10 +990,13 @@ function goHome() {
           </button>
         </li>
         <li v-if="!messages.length" class="empty">No messages yet — say hello.</li>
-        <li v-for="m in messages" :key="m.id" :class="['bubble', m.mine ? 'mine' : 'theirs']">
-          <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
-          {{ m.text }}
-        </li>
+        <template v-for="m in messages" :key="m.id">
+          <li v-if="m.kind !== 'message'" class="session-message-tag">{{ sessionMessageTagText(m) }}</li>
+          <li v-else :class="['bubble', m.mine ? 'mine' : 'theirs']">
+            <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
+            {{ m.text }}
+          </li>
+        </template>
         <li ref="scrollAnchor" class="anchor"></li>
       </ul>
 
@@ -925,6 +1266,31 @@ function goHome() {
   border-radius: 0.9rem;
   word-break: break-word;
   white-space: pre-wrap;
+}
+
+.session-message-tag {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.session-message-tag::before,
+.session-message-tag::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.grant-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
 }
 
 .sender {

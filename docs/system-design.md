@@ -504,9 +504,56 @@ considered and rejected: it trades one indexed existence check for an occasional
 start of a session's history, but a real check is cheap enough here that there's no reason to accept
 the imprecision.
 
-**Stage E: the admin/capability layer (design finalized, not yet built).** Worked out over several
+**Stage E: the admin/capability layer (in progress, built in slices).** Worked out over several
 rounds of design review, including two rejected alternatives verified with standalone scripts before
-being ruled out (see "Two rejected designs" below) — recorded here in full before any of it is coded.
+being ruled out (see "Two rejected designs" below) — recorded here in full before any of it was coded.
+
+**Slice 1, shipped:** the admin ECDH + signing keypair (generated at session creation, forwarded
+through `SessionAccessPayload`/`JoinPayload`), every identity's derived personal signing keypair,
+`session_participants`' payload gaining a `signingPublicKey`, and every new `session_log` message
+being signed and verified — see "Signing Is Opportunistic, Not Yet Enforced" and "Deriving an ECDSA
+Keypair From a Raw Scalar" in `docs/experience.md` for the transition-safety tradeoff and the one
+open cross-browser risk this leaves. `migrateGuestSessionToAccount` (`src/api/sessionActions.ts`) was
+also changed to take the guest's whole decrypted payload rather than a narrow parameter list, so a
+migrating guest identity's admin keys (and, later, a title) ride along instead of being silently
+dropped — a real gap the original narrower signature had.
+
+**Slice 2, shipped:** `deriveCapability` (the same one-way primitive as `deriveLookupTag`, aliased —
+see `lib/crypto.ts`), the full capability-grant flow (`grantCapability`/`acceptCapabilityGrant` in
+`src/api/sessionActions.ts` — the two-layer seal and self-write-on-receipt described below, verified
+end-to-end in `sessionActions.test.ts` without needing a live database), and gating invite-minting on
+`hasCapability(payload, 'invite')`: the Invite menu is hidden entirely for a member who hasn't been
+granted it, and `generateInvite`/`sendInviteByKey` both refuse defensively even if called some other
+way. `SessionView.vue` gained an admin-only "Grant access" panel listing current participants, and
+capability-grant entries render as centered session message tags in the thread (e.g. "Alice can now send
+invites") — the visible-to-everyone half of the design below.
+
+**Slice 3, shipped:** two more auto-logged `session_log` entry kinds, both signed by the acting
+identity's own personal signing key (not admin's — these are plain, publicly-visible facts, not
+private grants) and rendered as the same centered session message tags. `invite-sent` (`logInviteSent`) is
+written the moment an existing account is invited by public key — never for a join-link invite,
+which has no target identity yet to name — rendering as "X invited Y." `joined` (`logJoined`) is
+written by `joinExistingSession` itself right after a genuine join (skipped for the `alreadyHasAccess`
+no-op path — an account re-opening a link/invite it already redeemed doesn't get a second "joined"
+entry), rendering as "X joined by invite" or "X joined by join link." Both go through the same
+opportunistic verification as messages (`verifyOpportunistic` in `SessionView.vue`): unverifiable
+(sender's signing key not seen yet) renders anyway, a signature that actively fails against a known
+key gets dropped. The session-message-tag style itself changed alongside this: no background/border pill
+anymore, just centered text flanked by a thin rule on each side (`.session-message-tag::before`/`::after`),
+so a growing set of tag kinds doesn't turn the thread into a wall of pills.
+
+**Not yet built: signing invites themselves.** `session_invites`/`join_access` still work exactly as
+before Stage E — anyone holding the session key can still mint one, unaffected by the capability
+gate above beyond the *inviting client's own UI* refusing to offer it. Real enforcement needs a
+receiver-side signature check, and that turns out to be structurally weaker here than the rest of
+this design: a first-time joiner has no independent way to know a session's *real*
+`adminSigningPublicKey` before joining, since the only copy they'll ever see arrives inside the very
+payload the signature would be checked against — unlike a `session_log` entry, which every other
+verification here relies on the reader already being a session member (with the payload's admin key
+already trusted from their own prior join) to check. Worth doing anyway as tamper-evidence, but it
+would not be a real proof of authorization to a stranger the way it is for anyone already in the
+session — this needs to be documented honestly as a partial mitigation, not oversold as closing the
+gap, whenever it's built.
 
 *Two keypairs per session, both freshly generated at creation, neither derived from anything:*
 - `adminEcdhKeyPair` — its private half is what capabilities are derived from.

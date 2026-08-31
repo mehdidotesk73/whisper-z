@@ -243,6 +243,39 @@ particular failure was about — a `getByText(username)` timeout is exactly what
 looked up" looks like, and that should have been checked before reaching for a database-configuration
 explanation.
 
+### A System Tag's Name Was Baked In Before It Resolved
+
+Found by the user's own manual testing (not CI, which never caught it — see why below): "Ava can now
+send invites" rendered correctly in a session with prior message history, but the exact same kind of
+tag, in a brand-new session, rendered as "YellowZinniaZKV can now send invites" — the deterministic
+guest-style placeholder, not the real username, on *both* the granter's and the grantee's own screens.
+
+`resolveName(id)` (`SessionView.vue`) is fire-and-forget by design: it sets the guest-style placeholder
+into `participantNames` *synchronously* (also acting as a re-fetch guard), then updates it to the real
+`accounts` username once an async lookup resolves, later. A bubble's sender label reads this
+correctly because the template calls `nameFor(m.sender)` live, on every render — `participantNames`
+is a `reactive()` `Map`, so Vue's reactivity re-runs that expression the moment the async update lands.
+`handleCapabilityGrant`/`handleInviteSent`/`handleJoined`, though, called `resolveName` and then
+`nameFor` on the very next line, *inside* the decode function, and baked the result into a plain
+string stored in the `messages` array — permanently, if the real username hadn't arrived in that one
+synchronous instant. In a session with prior history, the name was already cached from an earlier
+message and happened to look correct; in a brand-new session, nothing had ever triggered the lookup
+before, so the placeholder froze in.
+
+**Why CI's own new test for this exact feature didn't catch it:** `grant-invite-capability.spec.ts`
+opens the "Grant access" panel before granting anything, and that panel's own participant list already
+triggers `resolveName` for everyone in it — so by the time the grant's tag rendered, the name was
+already cached, same as the "has history" case above. The bug only shows up when *nothing* has
+resolved that identity's name yet, which the test's own setup happened to rule out without meaning to.
+
+**Fix:** stop computing the tag's text at decode time. The `RenderedMessage` union's system-tag
+variants now carry the raw ids/facts (`granteePublicKeyId`, `capability`, etc.), and a new
+`systemTagText(m)` builds the display string at *render* time, called directly from the template —
+exactly the same pattern a bubble's sender label already used correctly. This isn't just a fix for the
+one symptom seen; it's the general rule anything resolving a name through this pattern needs to follow
+project-wide: never bake a `nameFor(...)` result into a value stored ahead of render, only ever call it
+live from somewhere Vue's reactivity is already re-running.
+
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)

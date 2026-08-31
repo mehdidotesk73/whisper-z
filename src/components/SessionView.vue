@@ -78,9 +78,17 @@ const status = ref<Status>('loading')
 // A capability-grant entry renders as a centered system tag, never a chat
 // bubble — see docs/system-design.md §3's "Stage E" entry ("kind decides
 // rendering").
+// A system-tag variant carries the raw ids/facts, not a pre-built display
+// string — resolveName's real-username fetch is async, so baking a name
+// into a fixed string at decode time can freeze in a not-yet-resolved
+// placeholder forever. systemTagText (below) computes the text at render
+// time instead, calling nameFor live so it stays in sync as names resolve —
+// exactly like a bubble's sender label already does.
 type RenderedMessage =
   | { id: string; kind: 'message'; mine: boolean; sender: string; text: string }
-  | { id: string; kind: 'system'; text: string }
+  | { id: string; kind: 'capability-grant'; granteePublicKeyId: string; capability: string }
+  | { id: string; kind: 'invite-sent'; sender: string; inviteePublicKeyId: string }
+  | { id: string; kind: 'joined'; sender: string; via: 'link' | 'invite' }
 
 const messages = ref<RenderedMessage[]>([])
 const draft = ref('')
@@ -269,9 +277,7 @@ async function handleCapabilityGrant(id: string, entry: CapabilityGrantEntry): P
   }
 
   resolveName(entry.granteePublicKeyId)
-  const name = nameFor(entry.granteePublicKeyId)
-  const text = entry.capability === 'invite' ? `${name} can now send invites` : `${name} was granted "${entry.capability}" access`
-  return { id, kind: 'system', text }
+  return { id, kind: 'capability-grant', granteePublicKeyId: entry.granteePublicKeyId, capability: entry.capability }
 }
 
 /**
@@ -296,8 +302,7 @@ async function handleInviteSent(id: string, entry: InviteSentEntry): Promise<Ren
   }
   resolveName(entry.sender)
   resolveName(entry.inviteePublicKeyId)
-  const text = `${nameFor(entry.sender)} invited ${nameFor(entry.inviteePublicKeyId)}`
-  return { id, kind: 'system', text }
+  return { id, kind: 'invite-sent', sender: entry.sender, inviteePublicKeyId: entry.inviteePublicKeyId }
 }
 
 async function handleJoined(id: string, entry: JoinedEntry): Promise<RenderedMessage | null> {
@@ -307,8 +312,17 @@ async function handleJoined(id: string, entry: JoinedEntry): Promise<RenderedMes
     return null
   }
   resolveName(entry.sender)
-  const text = `${nameFor(entry.sender)} joined by ${entry.via === 'invite' ? 'invite' : 'join link'}`
-  return { id, kind: 'system', text }
+  return { id, kind: 'joined', sender: entry.sender, via: entry.via }
+}
+
+/** Computed at render time (template calls this live), not baked in at decode time — see RenderedMessage's doc comment for why that distinction matters. */
+function systemTagText(m: Extract<RenderedMessage, { kind: 'capability-grant' | 'invite-sent' | 'joined' }>): string {
+  if (m.kind === 'capability-grant') {
+    const name = nameFor(m.granteePublicKeyId)
+    return m.capability === 'invite' ? `${name} can now send invites` : `${name} was granted "${m.capability}" access`
+  }
+  if (m.kind === 'invite-sent') return `${nameFor(m.sender)} invited ${nameFor(m.inviteePublicKeyId)}`
+  return `${nameFor(m.sender)} joined by ${m.via === 'invite' ? 'invite' : 'join link'}`
 }
 
 async function decodeLogEntry(row: { id: string; ciphertext: string; iv: string }): Promise<RenderedMessage | null> {
@@ -966,7 +980,7 @@ function goHome() {
         </li>
         <li v-if="!messages.length" class="empty">No messages yet — say hello.</li>
         <template v-for="m in messages" :key="m.id">
-          <li v-if="m.kind === 'system'" class="system-tag">{{ m.text }}</li>
+          <li v-if="m.kind !== 'message'" class="system-tag">{{ systemTagText(m) }}</li>
           <li v-else :class="['bubble', m.mine ? 'mine' : 'theirs']">
             <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
             {{ m.text }}

@@ -15,9 +15,17 @@ import { expect } from './fixtures'
 // happen to be message-related.
 export const NETWORK_TIMEOUT = 20000
 
-/** accounts.username is globally unique in the live database — always generate one, never hardcode. */
+/**
+ * accounts.username is globally unique in the live database — always
+ * generate one, never hardcode. Kept under guestName.ts's 20-character
+ * truncateName limit (a base36 timestamp + a short random suffix, not the
+ * full decimal Date.now()) so an assertion comparing against the exact
+ * username isn't broken by the app's own — entirely correct — truncation.
+ */
 export function uniqueUsername(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+  const timestamp = Date.now().toString(36)
+  const random = Math.random().toString(36).slice(2, 5)
+  return `${prefix}-${timestamp}-${random}`
 }
 
 /** From the logged-out home screen: creates an account, returns its account link. */
@@ -130,12 +138,20 @@ export async function sendInviteByKey(page: Page, publicKeyBlob: string): Promis
   await page.getByRole('button', { name: 'Close' }).click()
 }
 
-/** From AccountHome: opens the Account menu's "My public key" panel and returns the blob. */
+/**
+ * From AccountHome: opens the Account menu's "My public key" panel and
+ * returns the blob. The modal (and its readonly input) becomes visible the
+ * instant it opens, but `myPublicKeyBlob` is populated by a separate async
+ * onMounted a moment later — waiting only for visibility can read an empty
+ * string, which then gets pasted into "Invite by key" whose Send button
+ * stays disabled on an empty paste, so nothing ever happens. Wait for the
+ * value itself, the same pattern getJoinLink already uses for "Generating…".
+ */
 export async function getMyPublicKey(page: Page): Promise<string> {
   await page.getByRole('button', { name: 'Account ▾' }).click()
   await page.getByRole('button', { name: 'My public key' }).click()
   const input = page.locator('.modal-box input[readonly]')
-  await expect(input).toBeVisible({ timeout: NETWORK_TIMEOUT })
+  await expect(input).not.toHaveValue('', { timeout: NETWORK_TIMEOUT })
   const key = await input.inputValue()
   await page.getByRole('button', { name: 'Close' }).click()
   return key

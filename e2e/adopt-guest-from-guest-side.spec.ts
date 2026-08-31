@@ -12,7 +12,7 @@ import {
   uniqueUsername,
 } from './helpers'
 import { unpackJwk, publicJwkFromPrivateJwk, canonicalPublicKeyId } from '../src/lib/crypto'
-import { guestNameForKey } from '../src/lib/guestName'
+import { guestNameForKey, truncateName } from '../src/lib/guestName'
 
 // Covers: the mirror image of adopt-guest-from-account-side.spec.ts — here
 // the guest initiates the merge itself, from its own SessionView's
@@ -44,7 +44,11 @@ test('a guest merges itself into an account and sender names resolve correctly o
     const guestKey = await joinAsGuestViaLink(guestPage, joinLink)
     manifest.track(guestKey)
     const guestPublicKeyId = canonicalPublicKeyId(publicJwkFromPrivateJwk(unpackJwk(guestKey)))
-    const expectedGuestName = guestNameForKey(guestPublicKeyId)
+    // guestNameForKey's raw output can exceed truncateName's 20-char limit
+    // (e.g. "Turquoise" + "Chrysanthemum" + suffix) — apply the same
+    // truncation the app renders with, so this doesn't depend on which
+    // random key this run happened to hash to.
+    const expectedGuestName = truncateName(guestNameForKey(guestPublicKeyId))
 
     const guestHistoryMessage = `guest history ${Date.now()}`
     await sendMessage(guestPage, guestHistoryMessage)

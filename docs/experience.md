@@ -191,6 +191,34 @@ an honestly-labeled best-effort improvement, not a hard guarantee — same spiri
 other documented gaps (see `docs/TODO.md`'s Code section: no forward secrecy, no out-of-band key
 verification).
 
+### `session_participants`'s Realtime Subscription Was Never Actually Proven to Fire
+
+Wiring `subscribeParticipants` into `SessionView.vue` for Stage E's grant panel (its list of who's in
+the session to grant to) was the *first* real use of that function anywhere in the app — it existed
+in `api/sessions.ts` since Stage D but nothing ever called it. A CI run surfaced this: a new E2E
+scenario (join a session, then immediately open the grant panel) timed out waiting for the just-joined
+participant to appear, on both the original attempt and its retry — a consistent failure, not a flake.
+`subscribeMessages` (`session_log`) is proven constantly by every other passing test in this suite;
+`subscribeSessionAccess` is *also* still unused dead code. The pattern across all three: only the one
+that's actually been exercised is proven to work.
+
+The suspected cause is a Postgres/Supabase-level setting, not application code — a table has to be
+added to the `supabase_realtime` publication for `postgres_changes` to fire on it at all, and nothing
+would have surfaced `session_participants` missing from that list before now, since nothing depended
+on it. This can't be confirmed or fixed from a sandbox with no network path to the live project (see
+the E2E section in `docs/system-design.md` §7 for that constraint generally) — it needs checking
+directly against the Supabase dashboard's Database → Replication settings.
+
+The fix that shipped alongside this doesn't wait to find out: the grant panel now does a plain
+`fetchParticipants` pull the moment it opens (`refreshParticipants` in `SessionView.vue`), rather than
+depending solely on the live subscription to have already caught up. Correct regardless of whether
+the publication setting turns out to be the real cause, and it's the more sensible design anyway for
+data the admin is about to act on right now — a push-based subscription stays valuable for keeping
+things updated quietly in the background, but isn't the right thing to block a just-opened panel on.
+The open item is confirming (or fixing) the publication setting directly, since anything else that
+ever comes to depend on `subscribeParticipants` or `subscribeSessionAccess` firing promptly would hit
+the same gap.
+
 ## Version History
 
 (Record major releases here as you merge features. Example format below.)

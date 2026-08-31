@@ -139,6 +139,18 @@ const grantedCapabilities = reactive(new Map<string, Set<string>>()) // publicKe
 const participantSigningKeys = new Map<string, CryptoKey>()
 let participantChannel: RealtimeChannel | null = null
 
+/**
+ * A plain pull, not just a wait on subscribeParticipants' live push —
+ * called again right before showing the grant panel, since that's the one
+ * place staleness is directly visible to the admin (a member who joined
+ * moments ago missing from the list they're about to act on), and a fresh
+ * fetch is trivially correct regardless of whether this session's realtime
+ * event actually arrives promptly.
+ */
+async function refreshParticipants() {
+  for (const row of await fetchParticipants(activeSessionId)) await registerParticipantRow(row)
+}
+
 async function registerParticipantRow(row: Pick<ParticipantRow, 'ciphertext' | 'iv'>) {
   if (!sessionKey) return
   try {
@@ -408,7 +420,7 @@ onMounted(async () => {
     // filters "not me" against it, and until this point (for an
     // account-backed route) it's still empty, which used to let the admin's
     // own name leak into the "grant invite access" panel's participant list.
-    for (const row of await fetchParticipants(activeSessionId)) await registerParticipantRow(row)
+    await refreshParticipants()
     participantChannel = subscribeParticipants(activeSessionId, registerParticipantRow)
 
     windowStart.value = new Date(Date.now() - MESSAGE_PAGE_DAYS * 24 * 60 * 60 * 1000).toISOString()
@@ -666,11 +678,12 @@ const showGrant = ref(false)
 const grantingTo = ref<string | null>(null)
 const grantError = ref('')
 
-function toggleGrant() {
+async function toggleGrant() {
   const opening = !showGrant.value
   closeAllPanels()
   showGrant.value = opening
   grantError.value = ''
+  if (opening) await refreshParticipants()
 }
 
 function hasBeenGrantedInvite(participantId: string): boolean {

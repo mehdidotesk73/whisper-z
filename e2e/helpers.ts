@@ -4,6 +4,7 @@
 // pure-logic coverage, and e2e/fixtures.ts for how cleanup works.
 import type { Page } from '@playwright/test'
 import { expect } from './fixtures'
+import type { TestManifest } from './fixtures'
 
 // Every action here does at least one real round trip to the live Supabase
 // project (see playwright.config.ts) — an insert, a select, or (for a sent
@@ -140,13 +141,42 @@ export async function getPersonalLink(page: Page): Promise<string> {
   return input.inputValue()
 }
 
-/** From an open SessionView: generates/reads a join link via the Invite menu. */
-export async function getJoinLink(page: Page): Promise<string> {
+/**
+ * From an open SessionView: generates a join link via the Invite menu and
+ * returns it. Always forces a fresh one (via "New link, for another
+ * person") rather than trusting whatever's already cached in
+ * SessionView.vue's `inviteLink` — a second call on the same page would
+ * otherwise silently hand back the exact same (single-use, so already-about-
+ * to-be-consumed-by-someone-else) link. Self-tracks every join_access row it
+ * creates, including the first auto-generated one that gets abandoned by the
+ * forced regeneration — nobody else will ever consume it, so it needs
+ * cleanup too.
+ */
+export async function getJoinLink(page: Page, manifest: TestManifest): Promise<string> {
   await page.getByRole('button', { name: 'Invite ▾' }).click()
   await page.getByRole('button', { name: 'By join link' }).click()
   const input = page.locator('.modal-box input[readonly]')
   await expect(input).not.toHaveValue('Generating…', { timeout: NETWORK_TIMEOUT })
-  const link = await input.inputValue()
+  const firstLink = await input.inputValue()
+  manifest.trackJoinAccess(firstLink.split('#/join/')[1].split('/')[0])
+
+  await page.getByRole('button', { name: 'New link, for another person' }).click()
+  // Two async steps happen after this click: the value briefly becomes the
+  // "Generating…" placeholder, then settles to the real new link. Waiting
+  // only for "not equal to firstLink" can catch that placeholder in the
+  // middle — "Generating…" already satisfies "not firstLink" — and read it
+  // before the real link lands. Poll and re-read together so `link` can
+  // only ever end up holding a value that passed both checks in the same
+  // instant, not survive a race where its check passed but the value moved
+  // on again before we came back to look at it.
+  let link = ''
+  await expect(async () => {
+    link = await input.inputValue()
+    expect(link).not.toBe(firstLink)
+    expect(link).not.toBe('Generating…')
+  }).toPass({ timeout: NETWORK_TIMEOUT })
+  manifest.trackJoinAccess(link.split('#/join/')[1].split('/')[0])
+
   await page.getByRole('button', { name: 'Close' }).click()
   return link
 }
@@ -258,6 +288,20 @@ export async function joinAsGuestViaLink(page: Page, joinLink: string): Promise<
   await page.getByRole('button', { name: 'Join as guest' }).click()
   await expect(page).toHaveURL(/#\/session\//, { timeout: NETWORK_TIMEOUT })
   return page.url().split('#/session/')[1]
+}
+
+/**
+ * Navigates to a join link while already logged in as an account —
+ * JoinSession.vue shows "Join as <username>" instead of "Join as guest"
+ * whenever `currentAccount` is set, joining directly under the account's
+ * real key rather than a fresh guest identity. Returns the sessionId from
+ * the resulting `#/mysession/<id>` URL.
+ */
+export async function joinAsAccountViaLink(page: Page, joinLink: string): Promise<string> {
+  await page.goto(joinLink)
+  await page.getByRole('button', { name: /^Join as / }).click()
+  await expect(page).toHaveURL(/#\/mysession\//, { timeout: NETWORK_TIMEOUT })
+  return page.url().split('#/mysession/')[1]
 }
 
 /** From AccountHome: adopts a guest identity (by its personal link or bare key) via the Account menu. */

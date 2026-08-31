@@ -20,9 +20,7 @@ test('a guest joins via a join link and messages render for both sides', async (
   manifest.track(accountLink)
   await startSessionAsAccount(page)
 
-  const joinLink = await getJoinLink(page)
-  const joinId = joinLink.split('#/join/')[1].split('/')[0]
-  manifest.trackJoinAccess(joinId)
+  const joinLink = await getJoinLink(page, manifest)
 
   const guestContext = await browser.newContext()
   const guestPage = await guestContext.newPage()

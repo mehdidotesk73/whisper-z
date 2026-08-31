@@ -134,7 +134,16 @@ export async function sendInviteByKey(page: Page, publicKeyBlob: string): Promis
   await page.getByRole('button', { name: 'By public key' }).click()
   await page.getByPlaceholder('Paste their public key').fill(publicKeyBlob)
   await page.getByRole('button', { name: 'Send invite' }).click()
-  await expect(page.getByText('Invite sent to')).toBeVisible({ timeout: NETWORK_TIMEOUT })
+
+  // Wait for whichever of the two outcomes the app actually renders, rather
+  // than only waiting for success and letting a real app-side error (shown
+  // in `.modal-box .error`) surface as an opaque timeout with no diagnosis.
+  const sentText = page.getByText('Invite sent to')
+  const errorText = page.locator('.modal-box .error')
+  await expect(sentText.or(errorText)).toBeVisible({ timeout: NETWORK_TIMEOUT })
+  if (await errorText.isVisible()) {
+    throw new Error(`sendInviteByKey: the app reported an error instead of sending: "${await errorText.textContent()}"`)
+  }
   await page.getByRole('button', { name: 'Close' }).click()
 }
 

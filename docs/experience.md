@@ -191,33 +191,37 @@ an honestly-labeled best-effort improvement, not a hard guarantee — same spiri
 other documented gaps (see `docs/TODO.md`'s Code section: no forward secrecy, no out-of-band key
 verification).
 
-### `session_participants`'s Realtime Subscription Was Never Actually Proven to Fire
+### A New Participant's Name Never Resolved Because Nothing Ever Asked
 
-Wiring `subscribeParticipants` into `SessionView.vue` for Stage E's grant panel (its list of who's in
-the session to grant to) was the *first* real use of that function anywhere in the app — it existed
-in `api/sessions.ts` since Stage D but nothing ever called it. A CI run surfaced this: a new E2E
-scenario (join a session, then immediately open the grant panel) timed out waiting for the just-joined
-participant to appear, on both the original attempt and its retry — a consistent failure, not a flake.
-`subscribeMessages` (`session_log`) is proven constantly by every other passing test in this suite;
-`subscribeSessionAccess` is *also* still unused dead code. The pattern across all three: only the one
-that's actually been exercised is proven to work.
+Stage E's grant panel (`SessionView.vue`) lists other participants by name via the same `nameFor` /
+`resolveName` pair the thread already uses for message senders. The first CI run of its E2E test
+timed out waiting for a just-joined member's username to appear in that list — consistently, on both
+the original attempt and its retry, ruling out a flake. First suspicion was `subscribeParticipants`'s
+realtime channel never having been exercised before (`subscribeSessionAccess` is also still-unused
+dead code, and only `subscribeMessages` is proven to fire by every other test in this suite) — a
+plausible Postgres/Supabase-realtime-publication gap, so the panel was changed to pull-refresh
+participants via a plain `fetchParticipants` the moment it opens, independent of any subscription.
 
-The suspected cause is a Postgres/Supabase-level setting, not application code — a table has to be
-added to the `supabase_realtime` publication for `postgres_changes` to fire on it at all, and nothing
-would have surfaced `session_participants` missing from that list before now, since nothing depended
-on it. This can't be confirmed or fixed from a sandbox with no network path to the live project (see
-the E2E section in `docs/system-design.md` §7 for that constraint generally) — it needs checking
-directly against the Supabase dashboard's Database → Replication settings.
+**That fix was reasonable to keep but didn't touch the actual bug, and CI immediately proved it** —
+the exact same failure, unchanged, on the very next run. The real cause: `registerParticipantRow`
+(new this stage, feeding the grant panel's participant list) added a public-key id to
+`otherParticipantIds` but never called `resolveName` on it. `resolveName` is what triggers the
+`accounts` lookup and caches the result — nothing else does. A sender's name resolves correctly only
+because `decodeMessage` already calls `resolveName(plain.sender)` for every message it renders; a
+participant who hasn't sent a message yet (or been the subject of a grant, the only other call site)
+had no path to ever get its real username looked up, and `nameFor` silently fell back to
+`guestNameForKey`'s deterministic placeholder forever — exactly the mismatched name ("BlueLavenderJ8V"
+next to real usernames like "Mehdi" and "Ava") the user's own manual screenshot had already shown,
+which should have been the first clue. Fixed with one line: `registerParticipantRow` now calls
+`resolveName(parsed.publicKeyId)` itself, the same way every other path that displays a participant's
+name already does.
 
-The fix that shipped alongside this doesn't wait to find out: the grant panel now does a plain
-`fetchParticipants` pull the moment it opens (`refreshParticipants` in `SessionView.vue`), rather than
-depending solely on the live subscription to have already caught up. Correct regardless of whether
-the publication setting turns out to be the real cause, and it's the more sensible design anyway for
-data the admin is about to act on right now — a push-based subscription stays valuable for keeping
-things updated quietly in the background, but isn't the right thing to block a just-opened panel on.
-The open item is confirming (or fixing) the publication setting directly, since anything else that
-ever comes to depend on `subscribeParticipants` or `subscribeSessionAccess` firing promptly would hit
-the same gap.
+**Lesson:** two consecutive fixes addressed at the same failing assertion, from a plausible-sounding
+infrastructure theory, before actually re-reading what the failing code path does end to end. The
+realtime-publication question is still open and worth checking eventually, but it was never what this
+particular failure was about — a `getByText(username)` timeout is exactly what "the name was never
+looked up" looks like, and that should have been checked before reaching for a database-configuration
+explanation.
 
 ## Version History
 

@@ -161,6 +161,13 @@ async function registerParticipantRow(row: Pick<ParticipantRow, 'ciphertext' | '
     }
     if (parsed.publicKeyId !== ownPublicKeyId && !otherParticipantIds.value.includes(parsed.publicKeyId)) {
       otherParticipantIds.value.push(parsed.publicKeyId)
+      // Without this, a participant who hasn't sent a message yet (or been
+      // the subject of a grant — the only other place resolveName gets
+      // called) shows up here under its deterministic guest-style fallback
+      // name forever, never its real account username, since resolveName's
+      // account lookup only ever runs for a key it's actually been asked
+      // about.
+      resolveName(parsed.publicKeyId)
     }
   } catch {
     // Not decryptable with this session's key — shouldn't happen, ignore.

@@ -504,12 +504,12 @@ end-to-end in `sessionActions.test.ts` without needing a live database), and gat
 `hasCapability(payload, 'invite')`: the Invite menu is hidden entirely for a member who hasn't been
 granted it, and `generateInvite`/`sendInviteByKey` both refuse defensively even if called some other
 way. `SessionView.vue` gained an admin-only "Grant access" panel listing current participants, and
-capability-grant entries render as centered system tags in the thread (e.g. "Alice can now send
+capability-grant entries render as centered session message tags in the thread (e.g. "Alice can now send
 invites") — the visible-to-everyone half of the design below.
 
 **Slice 3, shipped:** two more auto-logged `session_log` entry kinds, both signed by the acting
 identity's own personal signing key (not admin's — these are plain, publicly-visible facts, not
-private grants) and rendered as the same centered system tags. `invite-sent` (`logInviteSent`) is
+private grants) and rendered as the same centered session message tags. `invite-sent` (`logInviteSent`) is
 written the moment an existing account is invited by public key — never for a join-link invite,
 which has no target identity yet to name — rendering as "X invited Y." `joined` (`logJoined`) is
 written by `joinExistingSession` itself right after a genuine join (skipped for the `alreadyHasAccess`
@@ -517,8 +517,8 @@ no-op path — an account re-opening a link/invite it already redeemed doesn't g
 entry), rendering as "X joined by invite" or "X joined by join link." Both go through the same
 opportunistic verification as messages (`verifyOpportunistic` in `SessionView.vue`): unverifiable
 (sender's signing key not seen yet) renders anyway, a signature that actively fails against a known
-key gets dropped. The system-tag style itself changed alongside this: no background/border pill
-anymore, just centered text flanked by a thin rule on each side (`.system-tag::before`/`::after`),
+key gets dropped. The session-message-tag style itself changed alongside this: no background/border pill
+anymore, just centered text flanked by a thin rule on each side (`.session-message-tag::before`/`::after`),
 so a growing set of tag kinds doesn't turn the thread into a wall of pills.
 
 **Not yet built: signing invites themselves.** `session_invites`/`join_access` still work exactly as

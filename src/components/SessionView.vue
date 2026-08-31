@@ -75,13 +75,13 @@ const props = defineProps<{ packedKey?: string; sessionId?: string }>()
 type Status = 'loading' | 'ready' | 'not-found'
 const status = ref<Status>('loading')
 
-// A capability-grant entry renders as a centered system tag, never a chat
+// A capability-grant entry renders as a centered session message tag, never a chat
 // bubble — see docs/system-design.md §3's "Stage E" entry ("kind decides
 // rendering").
-// A system-tag variant carries the raw ids/facts, not a pre-built display
+// A session-message-tag variant carries the raw ids/facts, not a pre-built display
 // string — resolveName's real-username fetch is async, so baking a name
 // into a fixed string at decode time can freeze in a not-yet-resolved
-// placeholder forever. systemTagText (below) computes the text at render
+// placeholder forever. sessionMessageTagText (below) computes the text at render
 // time instead, calling nameFor live so it stays in sync as names resolve —
 // exactly like a bubble's sender label already does.
 type RenderedMessage =
@@ -249,7 +249,7 @@ async function scrollToBottom() {
 
 /**
  * Self-accepts a capability grant addressed to this identity (a no-op if it
- * isn't), then renders the grant as a system tag for everyone regardless —
+ * isn't), then renders the grant as a session message tag for everyone regardless —
  * the grant itself is visible to and verifiable by the whole session, only
  * the sealed secret inside it is private to the grantee. See
  * sessionActions.ts's acceptCapabilityGrant and CapabilityGrantEntry's own
@@ -327,7 +327,7 @@ async function handleJoined(id: string, entry: JoinedEntry): Promise<RenderedMes
 }
 
 /** Computed at render time (template calls this live), not baked in at decode time — see RenderedMessage's doc comment for why that distinction matters. */
-function systemTagText(m: Extract<RenderedMessage, { kind: 'capability-grant' | 'invite-sent' | 'joined' }>): string {
+function sessionMessageTagText(m: Extract<RenderedMessage, { kind: 'capability-grant' | 'invite-sent' | 'joined' }>): string {
   if (m.kind === 'capability-grant') {
     const name = nameFor(m.granteePublicKeyId)
     return m.capability === 'invite' ? `${name} can now send invites` : `${name} was granted "${m.capability}" access`
@@ -991,7 +991,7 @@ function goHome() {
         </li>
         <li v-if="!messages.length" class="empty">No messages yet — say hello.</li>
         <template v-for="m in messages" :key="m.id">
-          <li v-if="m.kind !== 'message'" class="system-tag">{{ systemTagText(m) }}</li>
+          <li v-if="m.kind !== 'message'" class="session-message-tag">{{ sessionMessageTagText(m) }}</li>
           <li v-else :class="['bubble', m.mine ? 'mine' : 'theirs']">
             <span v-if="!m.mine" class="sender">{{ nameFor(m.sender) }}</span>
             {{ m.text }}
@@ -1268,7 +1268,7 @@ function goHome() {
   white-space: pre-wrap;
 }
 
-.system-tag {
+.session-message-tag {
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -1277,8 +1277,8 @@ function goHome() {
   text-align: center;
 }
 
-.system-tag::before,
-.system-tag::after {
+.session-message-tag::before,
+.session-message-tag::after {
   content: '';
   flex: 1;
   height: 1px;

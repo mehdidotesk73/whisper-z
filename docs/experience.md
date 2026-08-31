@@ -243,7 +243,7 @@ particular failure was about — a `getByText(username)` timeout is exactly what
 looked up" looks like, and that should have been checked before reaching for a database-configuration
 explanation.
 
-### A System Tag's Name Was Baked In Before It Resolved
+### A Session Message Tag's Name Was Baked In Before It Resolved
 
 Found by the user's own manual testing (not CI, which never caught it — see why below): "Ava can now
 send invites" rendered correctly in a session with prior message history, but the exact same kind of
@@ -268,9 +268,9 @@ triggers `resolveName` for everyone in it — so by the time the grant's tag ren
 already cached, same as the "has history" case above. The bug only shows up when *nothing* has
 resolved that identity's name yet, which the test's own setup happened to rule out without meaning to.
 
-**Fix:** stop computing the tag's text at decode time. The `RenderedMessage` union's system-tag
+**Fix:** stop computing the tag's text at decode time. The `RenderedMessage` union's session-message-tag
 variants now carry the raw ids/facts (`granteePublicKeyId`, `capability`, etc.), and a new
-`systemTagText(m)` builds the display string at *render* time, called directly from the template —
+`sessionMessageTagText(m)` builds the display string at *render* time, called directly from the template —
 exactly the same pattern a bubble's sender label already used correctly. This isn't just a fix for the
 one symptom seen; it's the general rule anything resolving a name through this pattern needs to follow
 project-wide: never bake a `nameFor(...)` result into a value stored ahead of render, only ever call it
